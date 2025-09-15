@@ -1,0 +1,17 @@
+# GitHub App Manifest
+# Use this to create your own instance: https://github.com/settings/apps/new
+name: Greener CI/CD
+description: Automated secret management for GitHub Actions
+url: https://github.com/greener-hayden/greenerCICD
+hook_attributes:
+  url: https://api.github.com/app/webhook # GitHub automatically handles this for Actions
+default_events:
+  - installation
+  - installation_repositories
+  - installation_target
+default_permissions:
+  actions: write
+  contents: read
+  metadata: read
+  secrets: write
+public: false
