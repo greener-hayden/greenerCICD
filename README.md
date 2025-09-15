@@ -1,6 +1,8 @@
 # Greener CI/CD
 
-Automated GitHub App for zero-infrastructure secret management in CI/CD pipelines.
+[![Sync Status](https://github.com/greener-hayden/greenerCICD/actions/workflows/sync-app-secrets.yml/badge.svg)](https://github.com/greener-hayden/greenerCICD/actions/workflows/sync-app-secrets.yml)
+
+Automated GitHub App for zero-infrastructure secret management in CI/CD pipelines. Automatically discovers and configures all repositories that install the app.
 
 ## What it does
 Automatically provisions and manages secrets for GitHub repositories without requiring external infrastructure.
