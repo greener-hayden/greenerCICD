@@ -8,6 +8,7 @@ hook_attributes:
 default_events:
   - installation
   - installation_repositories
+  - installation_target
 default_permissions:
   actions: write
   contents: read
