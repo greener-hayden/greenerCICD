@@ -1,11 +1,13 @@
-name: Deploy GitHub Pages
+name: Deploy GitHub Pages (Optimized)
+
+# Skip if commit message contains [skip ci]
 
 on:
   push:
     branches: [main]
     paths:
-      - 'github-app/webhook.html'
-      - '.github/workflows/pages-deploy.yml'
+      - 'webhook.html'
+      - '.github/workflows/pages-deploy*.yml'
   workflow_dispatch:
 
 permissions:
@@ -15,40 +17,70 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true  # Cancel old deploys
 
 jobs:
+  # Quick check if deployment needed
+  changes:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 1
+    outputs:
+      pages: ${{ steps.filter.outputs.pages }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Absolute minimum for path filtering
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            pages:
+              - 'webhook.html'
+              - '.github/workflows/pages-deploy*.yml'
+
   deploy:
-    runs-on: ubuntu-latest
+    needs: changes
+    if: |
+      !contains(github.event.head_commit.message, '[skip ci]') &&
+      (needs.changes.outputs.pages == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2  # Reduced from default
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-      - name: Checkout
+      - name: Checkout minimal
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            webhook.html
+          sparse-checkout-cone-mode: false
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Build
+      - name: Build optimized
         run: |
-          mkdir -p _site/github-app
-          cp github-app/webhook.html _site/github-app/index.html
+          # Ultra-minimal build - directly in artifact directory
+          mkdir -p _site
+          cp webhook.html _site/index.html
+          echo '<html><body><h1>404</h1></body></html>' > _site/404.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: '_site'
+          retention-days: 1  # Minimal retention
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
 
-      - name: Output webhook URL
+      - name: Output URL
         run: |
-          echo "✅ Webhook endpoint deployed!"
-          echo "📍 URL: ${{ steps.deployment.outputs.page_url }}github-app/"
-          echo ""
-          echo "Update your GitHub App webhook URL to:"
-          echo "${{ steps.deployment.outputs.page_url }}github-app/"
+          echo "### ✅ Deployed to GitHub Pages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Webhook URL**: ${{ steps.deployment.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Update your GitHub App settings with this URL." >> $GITHUB_STEP_SUMMARY
