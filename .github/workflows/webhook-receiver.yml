@@ -1,0 +1,44 @@
+name: GitHub App Webhook Receiver
+
+on:
+  repository_dispatch:
+    types: [app_webhook]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  handle-webhook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: github.repository == 'greener-hayden/dotfiles'
+
+    steps:
+      - name: Process webhook
+        env:
+          EVENT: ${{ github.event.client_payload.event }}
+          PAYLOAD: ${{ github.event.client_payload.payload }}
+        run: |
+          echo "📨 Received $EVENT webhook"
+
+          # Decode payload
+          DECODED=$(echo "$PAYLOAD" | base64 -d)
+
+          # Extract repo info
+          if echo "$EVENT" | grep -q "installation"; then
+            REPOS=$(echo "$DECODED" | jq -r '.repositories[]?.full_name // .repositories_added[]?.full_name // empty')
+
+            if [ -n "$REPOS" ]; then
+              echo "🔄 Triggering secret sync for:"
+              echo "$REPOS"
+
+              # Trigger the sync workflow
+              gh workflow run sync-app-secrets.yml --repo greener-hayden/dotfiles
+            fi
+          fi
+
+      - name: Log event
+        run: |
+          echo "Event type: ${{ github.event.client_payload.event }}"
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

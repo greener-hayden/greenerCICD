@@ -1,0 +1,30 @@
+{
+  "appId": "YOUR_GITHUB_APP_ID",
+  "privateKey": "-----BEGIN RSA PRIVATE KEY-----\nYOUR_PRIVATE_KEY_HERE\n-----END RSA PRIVATE KEY-----",
+  "webhookSecret": "YOUR_WEBHOOK_SECRET",
+  "baseUrl": "https://your-webhook-handler.com",
+  "storage": {
+    "type": "json",
+    "path": "./installations.json"
+  },
+  "secrets": {
+    "prefix": "GREENER_",
+    "defaults": [
+      "CI_KEY",
+      "CI_SECRET",
+      "API_TOKEN",
+      "APP_ID",
+      "INSTALLATION_ID"
+    ]
+  },
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "workflow": {
+    "create": true,
+    "path": ".github/workflows/greener-ci.yml",
+    "template": "default"
+  }
+}

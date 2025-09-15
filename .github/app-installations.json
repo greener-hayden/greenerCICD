@@ -1,0 +1,7 @@
+{
+  "repositories": {},
+  "updated": "2024-01-01T00:00:00Z",
+  "synced": "never",
+  "description": "Tracks GitHub App installations and secret management",
+  "auto_rotate_days": 30
+}
