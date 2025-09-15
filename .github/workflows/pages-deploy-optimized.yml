@@ -26,6 +26,11 @@ jobs:
       pages: ${{ steps.filter.outputs.pages }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Minimal depth for path filtering
+
       - uses: dorny/paths-filter@v3
         id: filter
         with:
