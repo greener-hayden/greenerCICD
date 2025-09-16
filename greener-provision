@@ -10,7 +10,7 @@ WORKER_URL="https://greener-cicd-webhook-proxy.workers.dev"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # CLI metadata
-VERSION="0.4.0"
+VERSION="0.5.0"
 CLI_NAME="greener-provision"
 HOMEPAGE="https://github.com/greener-hayden/greenerCICD"
 
@@ -38,49 +38,190 @@ detect_os() {
 
 OS_TYPE=$(detect_os)
 
+# Terminal capability detection
+UI_MODE="auto"  # auto|rich|minimal|ci
+SUPPORTS_UNICODE=false
+SUPPORTS_ANSI=false
+IS_INTERACTIVE=false
+
+detect_terminal_capabilities() {
+  # Check if running in CI environment
+  if [[ -n "${CI:-}" ]] || [[ -n "${CONTINUOUS_INTEGRATION:-}" ]] || 
+     [[ -n "${GITHUB_ACTIONS:-}" ]] || [[ -n "${JENKINS_URL:-}" ]] || 
+     [[ -n "${TRAVIS:-}" ]] || [[ -n "${CIRCLECI:-}" ]] || 
+     [[ -n "${GITLAB_CI:-}" ]] || [[ -n "${BUILDKITE:-}" ]];
+  then
+    UI_MODE="ci"
+    return
+  fi
+
+  # Check if terminal is interactive
+  if [[ -t 0 && -t 1 ]]; then
+    IS_INTERACTIVE=true
+  fi
+
+  # Check for ANSI color support
+  if [[ -n "${NO_COLOR:-}" ]] || [[ "${TERM:-}" == "dumb" ]] || [[ ! -t 1 ]]; then
+    SUPPORTS_ANSI=false
+  else
+    SUPPORTS_ANSI=true
+  fi
+
+  # Check Unicode support
+  if [[ "${LANG:-}" == *"UTF-8"* ]] || [[ "${LC_ALL:-}" == *"UTF-8"* ]] || 
+     [[ "${LC_CTYPE:-}" == *"UTF-8"* ]];
+  then
+    # Test if we can actually display Unicode
+    if echo -e "\u2713" | grep -q "✓" 2>/dev/null; then
+      SUPPORTS_UNICODE=true
+    fi
+  fi
+
+  # Windows-specific checks
+  if [[ "$OS_TYPE" == "windows" ]]; then
+    if [[ -n "${WT_SESSION:-}" ]] || [[ -n "${MSYSTEM:-}" ]] || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+      SUPPORTS_UNICODE=true
+      SUPPORTS_ANSI=true
+    else
+      SUPPORTS_UNICODE=false
+      SUPPORTS_ANSI=false
+    fi
+  fi
+
+  # Determine UI mode based on capabilities
+  if [[ "$UI_MODE" == "auto" ]]; then
+    if [[ "$SUPPORTS_UNICODE" == "true" && "$SUPPORTS_ANSI" == "true" && "$IS_INTERACTIVE" == "true" ]]; then
+      UI_MODE="rich"
+    elif [[ "$SUPPORTS_ANSI" == "true" ]]; then
+      UI_MODE="minimal"
+    else
+      UI_MODE="ci"
+    fi
+  fi
+}
+
+detect_terminal_capabilities
+
+# Visual elements and sprites
+declare -A SPRITES
+declare -A ICONS
+
+init_visual_elements() {
+  case "$UI_MODE" in
+    rich)
+      # Rich mode with Unicode sprites and icons
+      SPRITES["rocket"]="🚀"
+      SPRITES["package"]="📦"
+      SPRITES["key"]="🔑"
+      SPRITES["lock"]="🔒"
+      SPRITES["shield"]="🛡️"
+      SPRITES["cloud"]="☁️"
+      SPRITES["gear"]="⚙️"
+      SPRITES["sparkle"]="✨"
+      SPRITES["check"]="✅"
+      SPRITES["cross"]="❌"
+      SPRITES["warning"]="⚠️"
+      SPRITES["info"]="ℹ️"
+      SPRITES["bulb"]="💡"
+      SPRITES["globe"]="🌍"
+      SPRITES["bot"]="🤖"
+      
+      ICONS["success"]="✓"
+      ICONS["error"]="✗"
+      ICONS["warning"]="⚠"
+      ICONS["info"]="ℹ"
+      ICONS["arrow"]="→"
+      ICONS["bullet"]="•"
+      ICONS["progress"]="▶"
+      ;;
+    minimal)
+      # Minimal mode with basic Unicode
+      SPRITES["rocket"]=">"
+      SPRITES["package"]="[]"
+      SPRITES["key"]="*"
+      SPRITES["lock"]="#"
+      SPRITES["shield"]="+"
+      SPRITES["cloud"]="~"
+      SPRITES["gear"]="@"
+      SPRITES["sparkle"]="*"
+      SPRITES["check"]="✓"
+      SPRITES["cross"]="✗"
+      SPRITES["warning"]="!"
+      SPRITES["info"]="i"
+      SPRITES["bulb"]="?"
+      SPRITES["globe"]="o"
+      SPRITES["bot"]="&"
+      
+      ICONS["success"]="✓"
+      ICONS["error"]="✗"
+      ICONS["warning"]="!"
+      ICONS["info"]="i"
+      ICONS["arrow"]=">"
+      ICONS["bullet"]="-"
+      ICONS["progress"]=">"
+      ;;
+    ci|*)
+      # CI mode with ASCII only
+      SPRITES["rocket"]="[RUN]"
+      SPRITES["package"]="[PKG]"
+      SPRITES["key"]="[KEY]"
+      SPRITES["lock"]="[SEC]"
+      SPRITES["shield"]="[PRO]"
+      SPRITES["cloud"]="[API]"
+      SPRITES["gear"]="[CFG]"
+      SPRITES["sparkle"]="[NEW]"
+      SPRITES["check"]="[OK]"
+      SPRITES["cross"]="[ERR]"
+      SPRITES["warning"]="[WRN]"
+      SPRITES["info"]="[INF]"
+      SPRITES["bulb"]="[TIP]"
+      SPRITES["globe"]="[WEB]"
+      SPRITES["bot"]="[BOT]"
+      
+      ICONS["success"]="[OK]"
+      ICONS["error"]="[ERR]"
+      ICONS["warning"]="[WRN]"
+      ICONS["info"]="[INF]"
+      ICONS["arrow"]="->"
+      ICONS["bullet"]="*"
+      ICONS["progress"]="=>"
+      ;;
+  esac
+}
+
 # Colors and formatting (cross-platform support)
 init_colors() {
-  # Check if colors should be disabled
-  if [[ -n "${NO_COLOR:-}" ]] || [[ "${TERM:-}" == "dumb" ]]; then
-    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
-    return
-  fi
-  
-  # Check if output is to terminal
-  if [[ ! -t 1 ]]; then
-    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
-    return
-  fi
-  
-  # Windows-specific color handling
-  if [[ "$OS_TYPE" == "windows" ]]; then
-    # Check if running in Windows Terminal, Git Bash, or WSL
-    if [[ -n "${WT_SESSION:-}" ]] || [[ -n "${MSYSTEM:-}" ]] || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
-      # Modern Windows terminals support ANSI colors
-      RED='\033[0;31m'
-      GREEN='\033[0;32m'
-      YELLOW='\033[1;33m'
-      BLUE='\033[0;34m'
-      BOLD='\033[1m'
-      DIM='\033[2m'
-      NC='\033[0m'
-    else
-      # Fallback for older Windows terminals
-      RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
-    fi
-  else
-    # Unix-like systems (Linux, macOS)
+  if [[ "$UI_MODE" == "ci" ]] || [[ "$SUPPORTS_ANSI" != "true" ]]; then
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; PURPLE=""; CYAN=""; BOLD=""; DIM=""; UNDERLINE=""; NC=""
+  elif [[ "$UI_MODE" == "rich" ]]; then
+    # Enhanced colors for rich mode
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[1;33m'
     BLUE='\033[0;34m'
+    PURPLE='\033[0;35m'
+    CYAN='\033[0;36m'
     BOLD='\033[1m'
     DIM='\033[2m'
+    UNDERLINE='\033[4m'
+    NC='\033[0m'
+  else
+    # Basic colors for minimal mode
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    PURPLE=''
+    CYAN=''
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    UNDERLINE=''
     NC='\033[0m'
   fi
 }
 
 init_colors
+init_visual_elements
 
 # Logging levels: 0=silent 1=error 2=warn 3=info 4=debug
 LOG_LEVEL=${GREENER_LOG_LEVEL:-3}
@@ -92,23 +233,31 @@ log_debug() {
 
 log_info() {
   [[ "$OUTPUT_MODE" == "json" ]] && return
-  [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "${BLUE}ℹ${NC} $1"
+  if [[ ${LOG_LEVEL} -ge 3 ]]; then
+    echo -e "${BLUE}${ICONS[info]}${NC} $1"
+  fi
 }
 
 log_success() {
   [[ "$OUTPUT_MODE" == "json" ]] && return
-  [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "${GREEN}✓${NC} $1"
+  if [[ ${LOG_LEVEL} -ge 3 ]]; then
+    echo -e "${GREEN}${ICONS[success]}${NC} $1"
+  fi
 }
 
 log_warning() {
   [[ "$OUTPUT_MODE" == "json" ]] && return
-  [[ ${LOG_LEVEL} -ge 2 ]] && echo -e "${YELLOW}⚠${NC} $1"
+  if [[ ${LOG_LEVEL} -ge 2 ]]; then
+    echo -e "${YELLOW}${ICONS[warning]}${NC} $1"
+  fi
 }
 
 log_error() {
   [[ "$OUTPUT_MODE" == "json" ]] && return
   # errors always print unless LOG_LEVEL=0
-  [[ ${LOG_LEVEL} -ge 1 ]] && echo -e "${RED}✗${NC} $1" >&2
+  if [[ ${LOG_LEVEL} -ge 1 ]]; then
+    echo -e "${RED}${ICONS[error]}${NC} $1" >&2
+  fi
 }
 
 log_header() {
@@ -116,28 +265,85 @@ log_header() {
   [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "\n${BOLD}$1${NC}"
 }
 
-# Spinner utilities
+# Spinner utilities with rich data
 SPINNER_PID=""
+SPINNER_START_TIME=""
+SPINNER_MESSAGE=""
+PROGRESS_DATA=""
+
+# Rich spinner frames based on UI mode
+get_spinner_frames() {
+  case "$UI_MODE" in
+    rich)
+      # Multiple spinner styles for rich mode
+      case "${SPINNER_STYLE:-dots}" in
+        dots) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
+        circle) echo "◐ ◓ ◑ ◒" ;;
+        bar) echo "▉▊▋▌▍▎▏▎▍▌▋▊▉" ;;
+        pulse) echo "⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷" ;;
+        globe) echo "🌍 🌎 🌏" ;;
+        clock) echo "🕐 🕑 🕒 🕓 🕔 🕕 🕖 🕗 🕘 🕙 🕚 🕛" ;;
+        *) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
+      esac
+      ;;
+    minimal)
+      echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏"
+      ;;
+    ci|*)
+      echo "- \\ | /"
+      ;;
+  esac
+}
+
+# Update progress data (for rich mode)
+update_progress() {
+  PROGRESS_DATA="$1"
+}
+
 spin_start() {
   local msg="$1"
+  local style="${2:-dots}"
   [[ ${LOG_LEVEL} -lt 3 ]] && return 0
   [[ "$OUTPUT_MODE" == "json" ]] && return 0
+  
+  # CI mode: just print the message without animation
+  if [[ "$UI_MODE" == "ci" ]]; then
+    echo "${ICONS[progress]} $msg"
+    return 0
+  fi
+  
   [[ ! -t 1 ]] && return 0
   
-  # Use simpler spinner characters for better cross-platform support
-  local frames
-  if [[ "$OS_TYPE" == "windows" ]]; then
-    # Simple ASCII spinner for Windows
-    frames=("-" "\\" "|" "/")
-  else
-    # Unicode spinner for Unix-like systems
-    frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
-  fi
+  SPINNER_MESSAGE="$msg"
+  SPINNER_START_TIME=$(date +%s)
+  SPINNER_STYLE="$style"
+  PROGRESS_DATA=""
+  
+  local frames_str
+  frames_str=$(get_spinner_frames)
+  IFS=' ' read -ra frames <<< "$frames_str"
   
   local i=0
   {
     while true; do
-      printf "\r${BLUE}%s${NC} %s" "${frames[i]}" "${msg}"
+      local elapsed_time=""
+      if [[ "$UI_MODE" == "rich" ]] && [[ -n "$SPINNER_START_TIME" ]]; then
+        local current_time
+        current_time=$(date +%s)
+        local elapsed=$((current_time - SPINNER_START_TIME))
+        if [[ $elapsed -ge 2 ]]; then
+          elapsed_time=" ${DIM}[${elapsed}s]${NC}"
+        fi
+      fi
+      
+      local progress_indicator=""
+      if [[ -n "$PROGRESS_DATA" ]]; then
+        progress_indicator=" ${CYAN}${PROGRESS_DATA}${NC}"
+      fi
+      
+      # Clear line and print spinner with optional data
+      printf "\r\033[K${BLUE}%s${NC} %s%s%s" "${frames[i]}" "${SPINNER_MESSAGE}" "${progress_indicator}" "${elapsed_time}"
+      
       i=$(( (i+1) % ${#frames[@]} ))
       sleep 0.1
     done
@@ -148,15 +354,49 @@ spin_start() {
 spin_stop() {
   local status="$1" # 0=success else error
   local msg="$2"
+  local extra_info="${3:-}"
+  
   [[ -n "${SPINNER_PID}" ]] && kill "${SPINNER_PID}" >/dev/null 2>&1 || true
   SPINNER_PID=""
+  
+  # CI mode
+  if [[ "$UI_MODE" == "ci" ]]; then
+    if [[ ${LOG_LEVEL} -ge 3 ]]; then
+      if [[ "$status" -eq 0 ]]; then
+        echo "${ICONS[success]} $msg"
+      else
+        echo "${ICONS[error]} $msg" >&2
+      fi
+      [[ -n "$extra_info" ]] && echo "  $extra_info"
+    fi
+    return
+  fi
+  
+  # Rich/minimal modes
   if [[ ${LOG_LEVEL} -ge 3 ]]; then
+    local elapsed_str=""
+    if [[ "$UI_MODE" == "rich" ]] && [[ -n "$SPINNER_START_TIME" ]]; then
+      local end_time
+      end_time=$(date +%s)
+      local total_elapsed=$((end_time - SPINNER_START_TIME))
+      if [[ $total_elapsed -ge 1 ]]; then
+        elapsed_str=" ${DIM}(${total_elapsed}s)${NC}"
+      fi
+    fi
+    
+    # Clear line and print final status
     if [[ "$status" -eq 0 ]]; then
-      printf "\r${GREEN}✓${NC} %s\n" "$msg"
+      printf "\r\033[K${GREEN}${ICONS[success]}${NC} %s%s\n" "$msg" "$elapsed_str"
+      [[ -n "$extra_info" ]] && echo "  ${DIM}${extra_info}${NC}"
     else
-      printf "\r${RED}✗${NC} %s\n" "$msg"
+      printf "\r\033[K${RED}${ICONS[error]}${NC} %s%s\n" "$msg" "$elapsed_str" >&2
+      [[ -n "$extra_info" ]] && echo "  ${YELLOW}${extra_info}${NC}" >&2
     fi
   fi
+  
+  SPINNER_START_TIME=""
+  SPINNER_MESSAGE=""
+  PROGRESS_DATA=""
 }
 
 # Prompt utilities
@@ -274,50 +514,85 @@ COMMAND="provision"
 
 # Check prerequisites
 check_prerequisites() {
-    log_header "Checking Prerequisites"
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[gear]} Checking Prerequisites"
+    else
+        log_header "Checking Prerequisites"
+    fi
 
     # GitHub CLI
+    spin_start "Checking for GitHub CLI" "dots"
+    sleep 0.3  # Brief delay for visual feedback
     if ! command -v gh &> /dev/null; then
-        log_error "GitHub CLI (gh) is not installed"
-        log_info "Install from: https://cli.github.com/"
+        spin_stop 1 "GitHub CLI (gh) is not installed" "Install from: https://cli.github.com/"
         exit ${EXIT_PREREQ}
     fi
-    log_success "GitHub CLI found"
+    spin_stop 0 "GitHub CLI found"
 
     # Authenticated?
+    spin_start "Checking GitHub authentication" "dots"
+    sleep 0.3
     if ! gh auth status &> /dev/null; then
-        log_error "Not authenticated with GitHub CLI"
-        log_info "Run: gh auth login"
+        spin_stop 1 "Not authenticated with GitHub CLI" "Run: gh auth login"
         exit ${EXIT_AUTH}
     fi
-    log_success "GitHub CLI authenticated"
+    spin_stop 0 "GitHub CLI authenticated"
+    
+    # Display UI mode info in rich mode
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_info "UI Mode: ${CYAN}Rich${NC} (Unicode: ${GREEN}Yes${NC}, Colors: ${GREEN}Yes${NC}, Interactive: ${GREEN}Yes${NC})"
+    elif [[ "$UI_MODE" == "minimal" ]]; then
+        log_info "UI Mode: Minimal (Limited Unicode/Colors)"
+    else
+        log_info "UI Mode: CI (Plain ASCII)"
+    fi
 }
 
 # Get user's repositories
 get_repositories() {
-    log_header "Fetching Your Repositories"
-
-    local repos
-    repos=$(gh repo list --limit 100 --json name,owner,isPrivate,pushedAt --jq '.[] | "\(.owner.login)/\(.name) (\(if .isPrivate then "private" else "public" end))"' | sort)
-
-    if [[ -z "$repos" ]]; then
-        log_error "No repositories found"
-        exit 1
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[globe]} Fetching Your Repositories"
+    else
+        log_header "Fetching Your Repositories"
     fi
 
+    spin_start "Loading repository list from GitHub" "globe"
+    update_progress "[0/100]"
+    
+    local repos
+    repos=$(gh repo list --limit 100 --json name,owner,isPrivate,pushedAt --jq '.[] | "\(.owner.login)/\(.name) (\(if .isPrivate then "private" else "public" end))"' | sort)
+    
+    local repo_count
+    repo_count=$(echo "$repos" | wc -l | tr -d ' ')
+    update_progress "[${repo_count}/100]"
+
+    if [[ -z "$repos" ]]; then
+        spin_stop 1 "No repositories found"
+        exit 1
+    fi
+    
+    spin_stop 0 "Found ${repo_count} repositories"
     echo "$repos"
 }
 
 # Interactive repository selection
 select_repositories() {
-    log_header "Select Repositories to Provision"
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[package]} Select Repositories to Provision"
+    else
+        log_header "Select Repositories to Provision"
+    fi
 
     local repos
     repos=$(get_repositories)
 
-
-    echo "Available repositories:"
-    echo "$repos" | nl -w2 -s'. '
+    if [[ "$UI_MODE" == "rich" ]]; then
+        echo -e "\n${BOLD}Available repositories:${NC}"
+        echo "$repos" | nl -w2 -s'. ' | sed "s/^/  ${ICONS[bullet]} /"
+    else
+        echo "Available repositories:"
+        echo "$repos" | nl -w2 -s'. '
+    fi
     echo
 
     read -p "Enter repository numbers (comma-separated, or 'all'): " selection
@@ -431,16 +706,26 @@ provision_repository() {
     fi
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        spin_start "[dry-run] Provisioning secrets for $repo"
+        spin_start "[dry-run] Provisioning secrets for $repo" "dots"
+        sleep 0.5
         spin_stop 0 "[dry-run] Would provision secrets for $repo"
         emit_json_repo_result "$repo" true "200" "[]"
         return 0
     fi
 
-    spin_start "Provisioning secrets for $repo"
+    local spinner_msg
+    if [[ "$UI_MODE" == "rich" ]]; then
+        spinner_msg="${SPRITES[key]} Provisioning secrets for ${BOLD}$repo${NC}"
+    else
+        spinner_msg="Provisioning secrets for $repo"
+    fi
+    spin_start "$spinner_msg" "pulse"
+    update_progress "[Connecting]"
 
+    update_progress "[Sending request]"
     local response
     response=$(http_request "POST" "$WORKER_URL/api/cli-provision" "{\"repository\": \"$repo\"}" "$token")
+    update_progress "[Processing]"
     
     if [[ -z "$response" ]]; then
         spin_stop 1 "Network error while provisioning $repo"
@@ -454,13 +739,18 @@ provision_repository() {
 
     case "$http_code" in
         200|201)
-            spin_stop 0 "Successfully provisioned secrets for $repo"
             # Try to parse secrets from response
             local secrets_list
             secrets_list=$(json_get_array "$body" "secrets")
+            local secret_info=""
             if [[ -n "$secrets_list" ]]; then
-                log_info "Provisioned secrets: $secrets_list"
+                if [[ "$UI_MODE" == "rich" ]]; then
+                    secret_info="${SPRITES[check]} Secrets: $secrets_list"
+                else
+                    secret_info="Secrets: $secrets_list"
+                fi
             fi
+            spin_stop 0 "Successfully provisioned secrets for $repo" "$secret_info"
             emit_json_repo_result "$repo" true "$http_code" "[]"
             return 0
             ;;
@@ -505,9 +795,15 @@ provision_secrets() {
     local token
     token=$(get_github_token)
 
-    log_header "Provisioning CI/CD Secrets"
-    log_info "Worker URL: $WORKER_URL"
-    log_info "Repositories selected: ${#repositories[@]}"
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[rocket]} Provisioning CI/CD Secrets"
+        log_info "${SPRITES[cloud]} Worker URL: ${CYAN}$WORKER_URL${NC}"
+        log_info "${SPRITES[package]} Repositories selected: ${BOLD}${#repositories[@]}${NC}"
+    else
+        log_header "Provisioning CI/CD Secrets"
+        log_info "Worker URL: $WORKER_URL"
+        log_info "Repositories selected: ${#repositories[@]}"
+    fi
 
     # Show summary and confirm
     if [[ "${ASSUME_YES}" != "true" ]]; then
@@ -534,17 +830,34 @@ provision_secrets() {
         echo
     done
 
-    log_header "Provisioning Complete"
-    log_info "Successfully provisioned: $success_count/$total_count repositories"
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[sparkle]} Provisioning Complete"
+    else
+        log_header "Provisioning Complete"
+    fi
+    
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_info "${SPRITES[check]} Successfully provisioned: ${GREEN}$success_count${NC}/${total_count} repositories"
+    else
+        log_info "Successfully provisioned: $success_count/$total_count repositories"
+    fi
 
     emit_json_summary "$success_count" "$total_count"
 
     if [[ $success_count -lt $total_count ]]; then
-        log_warning "Some repositories failed. Check permissions and repository access."
+        if [[ "$UI_MODE" == "rich" ]]; then
+            log_warning "${SPRITES[warning]} Some repositories failed. Check permissions and repository access."
+        else
+            log_warning "Some repositories failed. Check permissions and repository access."
+        fi
         exit ${EXIT_PARTIAL}
     fi
 
-    log_success "All repositories provisioned successfully!"
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_success "${SPRITES[rocket]} All repositories provisioned successfully! ${SPRITES[sparkle]}"
+    else
+        log_success "All repositories provisioned successfully!"
+    fi
 }
 # OS info helper
 os_name() {
@@ -707,6 +1020,7 @@ GLOBAL OPTIONS:
     -c, --config PATH           Load configuration file
         --dry-run               Preview actions without network calls
     -o, --output MODE           Output: pretty|json (default: pretty)
+        --ui MODE               UI mode: auto|rich|minimal|ci (default: auto)
     -v, --verbose               Increase verbosity (repeatable)
     -q, --quiet                 Reduce verbosity (errors only)
         --version               Show version information
@@ -875,6 +1189,18 @@ main() {
         -w|--worker-url) WORKER_URL="$2"; shift 2;;
         --dry-run) DRY_RUN=true; shift;;
         -o|--output) OUTPUT_MODE="$2"; shift 2;;
+        --ui)
+            UI_MODE="$2"
+            case "$UI_MODE" in
+                auto|rich|minimal|ci) ;;
+                *) log_error "Invalid UI mode: $2 (options: auto|rich|minimal|ci)"; exit ${EXIT_BAD_ARGS};;
+            esac
+            # Re-detect capabilities and reinitialize
+            detect_terminal_capabilities
+            init_colors
+            init_visual_elements
+            shift 2
+            ;;
         -v|--verbose) LOG_LEVEL=$(( LOG_LEVEL + 1 )); [[ ${LOG_LEVEL} -gt 4 ]] && LOG_LEVEL=4; shift;;
         -q|--quiet) LOG_LEVEL=1; shift;;
         --version) echo "${CLI_NAME} v${VERSION}"; exit ${EXIT_OK};;
@@ -896,8 +1222,12 @@ main() {
     esac
 
     # Provision default flow
-    # Use simple ASCII for better cross-platform support
-    log_header "Greener CI/CD Secret Provisioning (v${VERSION})"
+    # Display header based on UI mode
+    if [[ "$UI_MODE" == "rich" ]]; then
+        log_header "${SPRITES[rocket]} Greener CI/CD Secret Provisioning ${SPRITES[shield]} (v${VERSION})"
+    else
+        log_header "Greener CI/CD Secret Provisioning (v${VERSION})"
+    fi
     check_prerequisites
 
     local repositories=()
