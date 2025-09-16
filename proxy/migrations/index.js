@@ -8,7 +8,7 @@ import * as migration001 from './001_initial_schema.js';
 /**
  * Load all migrations into the manager
  */
-export function loadMigrations(db) {
+export async function loadMigrations(db) {
   const manager = new MigrationManager(db);
   
   // Register migrations in order
@@ -17,7 +17,7 @@ export function loadMigrations(db) {
   ];
   
   for (const migration of migrations) {
-    const checksum = migration.checksum || generateChecksum(migration.up);
+    const checksum = migration.checksum || await generateChecksum(migration.up);
     manager.register(
       migration.version,
       migration.name,
@@ -33,7 +33,7 @@ export function loadMigrations(db) {
  * Run migrations on database
  */
 export async function runMigrations(db) {
-  const manager = loadMigrations(db);
+  const manager = await loadMigrations(db);
   const result = await manager.migrate();
   
   console.log(`Migrations complete. Applied ${result.new} new migrations.`);
@@ -44,6 +44,6 @@ export async function runMigrations(db) {
  * Get migration status
  */
 export async function getMigrationStatus(db) {
-  const manager = loadMigrations(db);
+  const manager = await loadMigrations(db);
   return await manager.getStatus();
 }

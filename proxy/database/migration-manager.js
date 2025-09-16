@@ -62,47 +62,84 @@ export class MigrationManager {
   async applyMigration(migration) {
     console.log(`Applying migration ${migration.version}: ${migration.name}`);
     
-    // Start transaction (D1 auto-handles transactions for batch operations)
-    const statements = [];
-    
-    // Parse and prepare SQL statements
-    const sqlStatements = migration.upSql
-      .split(';')
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-    
-    for (const sql of sqlStatements) {
-      statements.push(this.db.prepare(sql));
+    try {
+      // Start transaction (D1 auto-handles transactions for batch operations)
+      const statements = [];
+      
+      // Parse and prepare SQL statements
+      const sqlStatements = migration.upSql
+        .split(';')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+      
+      if (sqlStatements.length === 0) {
+        throw new Error(`Migration ${migration.version} contains no SQL statements`);
+      }
+      
+      for (const sql of sqlStatements) {
+        try {
+          statements.push(this.db.prepare(sql));
+        } catch (err) {
+          throw new Error(`Failed to prepare SQL in migration ${migration.version}: ${err.message}\nSQL: ${sql}`);
+        }
+      }
+      
+      // Record migration
+      statements.push(
+        this.db.prepare(
+          'INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)'
+        ).bind(migration.version, migration.name, migration.checksum)
+      );
+      
+      // Execute all statements
+      const results = await this.db.batch(statements);
+      
+      // Check for errors in results
+      for (let i = 0; i < results.length; i++) {
+        if (results[i].error) {
+          throw new Error(`Statement ${i + 1} failed in migration ${migration.version}: ${results[i].error}`);
+        }
+      }
+      
+      console.log(`Migration ${migration.version} applied successfully`);
+    } catch (error) {
+      console.error(`Failed to apply migration ${migration.version}:`, error);
+      throw new Error(`Migration ${migration.version} failed: ${error.message}`);
     }
-    
-    // Record migration
-    statements.push(
-      this.db.prepare(
-        'INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)'
-      ).bind(migration.version, migration.name, migration.checksum)
-    );
-    
-    // Execute all statements
-    await this.db.batch(statements);
-    
-    console.log(`Migration ${migration.version} applied successfully`);
   }
 
   /**
    * Run all pending migrations
    */
   async migrate() {
-    await this.initialize();
+    try {
+      await this.initialize();
+    } catch (error) {
+      throw new Error(`Failed to initialize migration table: ${error.message}`);
+    }
     
-    const applied = await this.getAppliedMigrations();
+    let applied;
+    try {
+      applied = await this.getAppliedMigrations();
+    } catch (error) {
+      throw new Error(`Failed to get applied migrations: ${error.message}`);
+    }
+    
     const appliedVersions = new Set(applied.map(m => m.version));
     
     let migrationsRun = 0;
+    const errors = [];
     
     for (const migration of this.migrations) {
       if (!appliedVersions.has(migration.version)) {
-        await this.applyMigration(migration);
-        migrationsRun++;
+        try {
+          await this.applyMigration(migration);
+          migrationsRun++;
+        } catch (error) {
+          errors.push(error.message);
+          // Stop on first error to maintain migration order integrity
+          break;
+        }
       } else {
         // Verify checksum
         const existing = applied.find(m => m.version === migration.version);
@@ -115,9 +152,13 @@ export class MigrationManager {
       }
     }
     
+    if (errors.length > 0) {
+      throw new Error(`Migration failed: ${errors.join('; ')}`);
+    }
+    
     return {
       total: this.migrations.length,
-      applied: applied.length,
+      applied: applied.length + migrationsRun,
       new: migrationsRun
     };
   }
@@ -126,11 +167,20 @@ export class MigrationManager {
    * Get migration status
    */
   async getStatus() {
-    await this.initialize();
+    try {
+      await this.initialize();
+    } catch (error) {
+      throw new Error(`Failed to initialize migration table: ${error.message}`);
+    }
     
-    const applied = await this.getAppliedMigrations();
+    let applied;
+    try {
+      applied = await this.getAppliedMigrations();
+    } catch (error) {
+      throw new Error(`Failed to get migration status: ${error.message}`);
+    }
+    
     const appliedVersions = new Set(applied.map(m => m.version));
-    
     const pending = this.migrations.filter(m => !appliedVersions.has(m.version));
     
     return {
@@ -146,14 +196,12 @@ export class MigrationManager {
 }
 
 /**
- * Generate a simple checksum for SQL content
+ * Generate a secure checksum for SQL content using SHA-256
  */
-export function generateChecksum(content) {
-  let hash = 0;
-  for (let i = 0; i < content.length; i++) {
-    const char = content.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16);
+export async function generateChecksum(content) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }

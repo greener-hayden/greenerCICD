@@ -53,7 +53,11 @@ export default {
 async function handleMigrate(request, env) {
   // Verify authorization
   const authHeader = request.headers.get('Authorization');
-  const expectedToken = env.MIGRATION_TOKEN || 'default-migration-token';
+  const expectedToken = env.MIGRATION_TOKEN;
+  
+  if (!expectedToken) {
+    return new Response('Migration token not configured', { status: 500 });
+  }
   
   if (authHeader !== `Bearer ${expectedToken}`) {
     return new Response('Unauthorized', { status: 401 });

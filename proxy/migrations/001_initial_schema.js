@@ -9,8 +9,10 @@ export const up = `
 -- Admin table (single admin user)
 CREATE TABLE IF NOT EXISTS admin (
   id TEXT PRIMARY KEY DEFAULT '1',
-  username TEXT UNIQUE NOT NULL DEFAULT 'admin',
+  username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  iterations INTEGER DEFAULT 100000,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -72,4 +74,4 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_access_links_active ON access_links(active);
 `;
 
-export const checksum = '1a2b3c4d';
+export const checksum = null; // Will be auto-generated
