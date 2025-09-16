@@ -48,8 +48,12 @@ async function handleRequest(request, env, ctx) {
         return handleCallback(url.searchParams, request, validatedEnv);
       case '/api/provision':
         requireCsrf(request);
-        return request.method === 'POST' 
-          ? handleProvision(request, validatedEnv) 
+        return request.method === 'POST'
+          ? handleProvision(request, validatedEnv)
+          : methodNotAllowed();
+      case '/api/cli-provision':
+        return request.method === 'POST'
+          ? handleCliProvision(request, validatedEnv)
           : methodNotAllowed();
       case '/api/analytics':
         return handleAnalytics(url.searchParams, validatedEnv);
@@ -584,6 +588,122 @@ async function handleProvision(request, env) {
 }
 
 /**
+ * Handle CLI provision API with user GitHub token authentication
+ */
+async function handleCliProvision(request, env) {
+  try {
+    // Extract GitHub token from Authorization header
+    const authHeader = request.headers.get('Authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Authorization header with Bearer token required'
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const userToken = authHeader.slice(7); // Remove 'Bearer ' prefix
+    const payload = await readJson(request);
+
+    // Parse and validate the repository
+    const repository = parseRequiredString(payload.repository, 'repository', 100);
+
+    // Validate repository format (owner/name)
+    if (!/^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/.test(repository)) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Repository must be in owner/name format'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Verify user has access to the repository
+    const repoResponse = await fetch(`https://api.github.com/repos/${repository}`, {
+      headers: {
+        'Authorization': `Bearer ${userToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Greener-CI-CD-CLI'
+      }
+    });
+
+    if (!repoResponse.ok) {
+      if (repoResponse.status === 401) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'Invalid GitHub token'
+        }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } else if (repoResponse.status === 404) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Repository not found or no access: ${repository}`
+        }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } else {
+        return new Response(JSON.stringify({
+          success: false,
+          error: `Failed to verify repository access: ${repoResponse.status}`
+        }), {
+          status: repoResponse.status,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Generate secrets for the repository
+    const secrets = await generateSecretsForRepo(repository);
+
+    // Create or update secrets using user's token
+    const secretResults = [];
+    for (const [secretName, secretValue] of Object.entries(secrets)) {
+      try {
+        const result = await createSecret(repository, secretName, secretValue, userToken);
+        secretResults.push({
+          name: secretName,
+          status: result ? 'success' : 'failed'
+        });
+      } catch (error) {
+        secretResults.push({
+          name: secretName,
+          status: 'failed',
+          error: error.message
+        });
+      }
+    }
+
+    const success = secretResults.every(r => r.status === 'success');
+
+    return new Response(JSON.stringify({
+      success,
+      repository,
+      secrets: secretResults.filter(r => r.status === 'success').map(r => r.name),
+      failed: secretResults.filter(r => r.status === 'failed'),
+      timestamp: new Date().toISOString()
+    }), {
+      status: success ? 200 : 207, // 207 Multi-Status for partial success
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: error instanceof Response ? error.status : 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
  * Handle analytics API
  */
 async function handleAnalytics(params, env) {
@@ -822,6 +942,57 @@ function generateSecret(length) {
   // Use only lowercase letters and digits to avoid confusion
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   return Array.from(array, byte => chars[byte % chars.length]).join('');
+}
+
+/**
+ * Generate secrets for a specific repository
+ */
+async function generateSecretsForRepo(repoFullName) {
+  return {
+    GREENER_CI_KEY: generateSecret(32),
+    GREENER_CI_SECRET: generateSecret(64),
+    GREENER_API_TOKEN: generateSecret(32),
+    GREENER_APP_ID: 'cli-generated',
+    GREENER_INSTALLATION_ID: 'user-provisioned'
+  };
+}
+
+/**
+ * Create a secret in a repository using user token
+ */
+async function createSecret(repoFullName, secretName, secretValue, userToken) {
+  // Get public key for encryption
+  const keyResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/public-key`, {
+    headers: {
+      'Authorization': `Bearer ${userToken}`,
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'Greener-CI-CD-CLI'
+    }
+  });
+
+  if (!keyResponse.ok) {
+    throw new Error(`Failed to get public key: ${keyResponse.status}`);
+  }
+
+  const keyData = await keyResponse.json();
+  // TODO: Properly encrypt secret using sodium
+  const encryptedValue = btoa(secretValue);
+
+  const secretResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/${secretName}`, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${userToken}`,
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'Greener-CI-CD-CLI',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      encrypted_value: encryptedValue,
+      key_id: keyData.key_id
+    })
+  });
+
+  return secretResponse.ok;
 }
 
 /**

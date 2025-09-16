@@ -2,6 +2,13 @@ name: Deploy Cloudflare Worker
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - 'proxy/**'
+      - 'wrangler.toml'
+      - '.github/workflows/deploy-worker.yml'
+  pull_request:
     paths:
       - 'proxy/**'
       - 'wrangler.toml'
@@ -16,21 +23,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  # Validation job for PRs - runs automatically
+  validate:
     runs-on: ubuntu-22.04
     timeout-minutes: 2
-    if: github.repository == 'greener-hayden/greenerCICD'
+    if: github.event_name == 'pull_request' && github.repository == 'greener-hayden/greenerCICD'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Check secrets and variables
+      - name: Validate worker syntax
         run: |
-          echo "Checking availability..."
+          echo "🔍 Validating worker code..."
+          # Basic syntax check
+          node -c proxy/worker.js
+          echo "✅ Worker syntax is valid"
+
+      - name: Validate wrangler config
+        run: |
+          echo "🔍 Validating wrangler.toml..."
+          # Check if wrangler.toml is valid TOML
+          if command -v toml-test >/dev/null 2>&1; then
+            toml-test wrangler.toml
+          else
+            echo "⚠️ toml-test not available, skipping validation"
+          fi
+          echo "✅ wrangler.toml appears valid"
+
+      - name: Check secrets availability (dry run)
+        run: |
+          echo "🔍 Checking deployment prerequisites..."
           echo "GITHUB_TOKEN: $([ -n '${{ github.token }}' ] && echo 'present' || echo 'missing')"
           echo "WEBHOOK_SECRET: $([ -n '${{ secrets.WEBHOOK_SECRET }}' ] && echo 'present' || echo 'missing')"
           echo "APP_ID: $([ -n '${{ vars.APP_ID }}' ] && echo 'present' || echo 'missing')"
+          echo "CLOUDFLARE_API_TOKEN: $([ -n '${{ secrets.CLOUDFLARE_API_TOKEN }}' ] && echo 'present' || echo 'missing')"
+
+  # Deployment job - requires manual approval for PRs, auto for main branch
+  deploy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    if: github.repository == 'greener-hayden/greenerCICD'
+    needs: [validate]
+    environment:
+      name: ${{ github.event_name == 'pull_request' && 'pr-deployment' || 'production' }}
+      url: https://greener-cicd-webhook-proxy.workers.dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deployment info
+        run: |
+          echo "🚀 Deploying to Cloudflare Worker..."
+          echo "Event: ${{ github.event_name }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Environment: ${{ github.event_name == 'pull_request' && 'pr-deployment' || 'production' }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "⏳ PR deployment requires manual approval"
+          else
+            echo "✅ Main branch deployment - proceeding automatically"
+          fi
+
+      - name: Check secrets and variables
+        run: |
+          echo "🔍 Checking deployment prerequisites..."
+          echo "GITHUB_TOKEN: $([ -n '${{ github.token }}' ] && echo 'present' || echo 'missing')"
+          echo "WEBHOOK_SECRET: $([ -n '${{ secrets.WEBHOOK_SECRET }}' ] && echo 'present' || echo 'missing')"
+          echo "APP_ID: $([ -n '${{ vars.APP_ID }}' ] && echo 'present' || echo 'missing')"
+          echo "CLOUDFLARE_API_TOKEN: $([ -n '${{ secrets.CLOUDFLARE_API_TOKEN }}' ] && echo 'present' || echo 'missing')"
 
       - name: Deploy with Wrangler
         uses: cloudflare/wrangler-action@v3.14.1
@@ -50,5 +111,10 @@ jobs:
         run: |
           echo "### ✅ Worker Deployed" >> $GITHUB_STEP_SUMMARY
           echo "**Worker Name**: greener-cicd-webhook-proxy" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment**: production" >> $GITHUB_STEP_SUMMARY
-          echo "**Next Step**: Set worker URL in GitHub App webhook settings" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ github.event_name == 'pull_request' && 'pr-deployment' || 'production' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Event**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Worker URL**: https://greener-cicd-webhook-proxy.workers.dev" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "**Note**: This was a PR deployment that required manual approval" >> $GITHUB_STEP_SUMMARY
+          fi

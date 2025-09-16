@@ -48,6 +48,7 @@ build/
 
 # Wrangler
 .wrangler/
+worker-bundled.js
 
 # Act (local testing)
 .act-cache/
