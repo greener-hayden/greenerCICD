@@ -26,18 +26,61 @@ EXIT_RATE_LIMIT=7
 EXIT_NETWORK=8
 EXIT_PARTIAL=10
 
-# Colors and formatting (respect NO_COLOR and non-TTY)
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-  RED='\033[0;31m'
-  GREEN='\033[0;32m'
-  YELLOW='\033[1;33m'
-  BLUE='\033[0;34m'
-  BOLD='\033[1m'
-  DIM='\033[2m'
-  NC='\033[0m' # No Color
-else
-  RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
-fi
+# Detect OS and terminal environment
+detect_os() {
+  case "$(uname -s 2>/dev/null || echo 'Unknown')" in
+    Darwin*) echo "macos" ;;
+    Linux*) echo "linux" ;;
+    MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+OS_TYPE=$(detect_os)
+
+# Colors and formatting (cross-platform support)
+init_colors() {
+  # Check if colors should be disabled
+  if [[ -n "${NO_COLOR:-}" ]] || [[ "${TERM:-}" == "dumb" ]]; then
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
+    return
+  fi
+  
+  # Check if output is to terminal
+  if [[ ! -t 1 ]]; then
+    RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
+    return
+  fi
+  
+  # Windows-specific color handling
+  if [[ "$OS_TYPE" == "windows" ]]; then
+    # Check if running in Windows Terminal, Git Bash, or WSL
+    if [[ -n "${WT_SESSION:-}" ]] || [[ -n "${MSYSTEM:-}" ]] || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+      # Modern Windows terminals support ANSI colors
+      RED='\033[0;31m'
+      GREEN='\033[0;32m'
+      YELLOW='\033[1;33m'
+      BLUE='\033[0;34m'
+      BOLD='\033[1m'
+      DIM='\033[2m'
+      NC='\033[0m'
+    else
+      # Fallback for older Windows terminals
+      RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
+    fi
+  else
+    # Unix-like systems (Linux, macOS)
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    NC='\033[0m'
+  fi
+}
+
+init_colors
 
 # Logging levels: 0=silent 1=error 2=warn 3=info 4=debug
 LOG_LEVEL=${GREENER_LOG_LEVEL:-3}
@@ -80,7 +123,17 @@ spin_start() {
   [[ ${LOG_LEVEL} -lt 3 ]] && return 0
   [[ "$OUTPUT_MODE" == "json" ]] && return 0
   [[ ! -t 1 ]] && return 0
-  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  
+  # Use simpler spinner characters for better cross-platform support
+  local frames
+  if [[ "$OS_TYPE" == "windows" ]]; then
+    # Simple ASCII spinner for Windows
+    frames=("-" "\\" "|" "/")
+  else
+    # Unicode spinner for Unix-like systems
+    frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  fi
+  
   local i=0
   {
     while true; do
@@ -173,24 +226,40 @@ trap cleanup EXIT INT TERM
 # JSON helpers
 is_json() { [[ "$OUTPUT_MODE" == "json" ]]; }
 
+# Simple JSON construction using printf
+json_escape() {
+  local str="$1"
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  echo "$str"
+}
+
 emit_json_repo_result() {
   local repo="$1"; local ok="$2"; local http="$3"; local secrets_str="$4"
   if is_json; then
-    jq -n --arg repo "$repo" --argjson ok "$ok" --arg http "$http" --arg secrets "$secrets_str" '{time: now, type:"provision", repo:$repo, ok:$ok, http: ( ($http|tonumber) // null ), secrets:(try ($secrets|fromjson) catch null)}'
+    repo=$(json_escape "$repo")
+    printf '{"time":%d,"type":"provision","repo":"%s","ok":%s,"http":%s,"secrets":%s}\n' \
+      "$(date +%s)" "$repo" "$ok" "${http:-null}" "${secrets_str:-null}"
   fi
 }
 
 emit_json_summary() {
   local success="$1"; local total="$2"
   if is_json; then
-    jq -n --argjson success "$success" --argjson total "$total" '{time: now, type:"summary", success:$success, total:$total}'
+    printf '{"time":%d,"type":"summary","success":%d,"total":%d}\n' \
+      "$(date +%s)" "$success" "$total"
   fi
 }
 
 emit_json_status() {
   local http="$1"; local body="$2"
   if is_json; then
-    jq -n --argjson http "$http" --arg body "$body" '{time: now, type:"status", http:$http, body:(try ($body|fromjson) catch $body)}'
+    body=$(json_escape "$body")
+    printf '{"time":%d,"type":"status","http":%d,"body":"%s"}\n' \
+      "$(date +%s)" "$http" "$body"
   fi
 }
 
@@ -212,7 +281,6 @@ check_prerequisites() {
         log_error "GitHub CLI (gh) is not installed"
         log_info "Install from: https://cli.github.com/"
         exit ${EXIT_PREREQ}
-
     fi
     log_success "GitHub CLI found"
 
@@ -223,23 +291,6 @@ check_prerequisites() {
         exit ${EXIT_AUTH}
     fi
     log_success "GitHub CLI authenticated"
-
-    # jq
-    if ! command -v jq &> /dev/null; then
-        log_error "jq is required for JSON parsing"
-        log_info "Install: brew install jq  |  sudo apt-get install jq"
-        log_info "Docs: https://stedolan.github.io/jq/download/"
-        exit ${EXIT_PREREQ}
-    fi
-    log_success "jq found"
-
-    # curl
-    if ! command -v curl &> /dev/null; then
-        log_error "curl is required"
-        log_info "Install: brew install curl  |  sudo apt-get install curl"
-        exit ${EXIT_PREREQ}
-    fi
-    log_success "curl found"
 }
 
 # Get user's repositories
@@ -247,7 +298,7 @@ get_repositories() {
     log_header "Fetching Your Repositories"
 
     local repos
-    repos=$(gh repo list --limit 100 --json name,owner,isPrivate,pushedAt | jq -r '.[] | "\(.owner.login)/\(.name) (\(if .isPrivate then "private" else "public" end))"' | sort)
+    repos=$(gh repo list --limit 100 --json name,owner,isPrivate,pushedAt --jq '.[] | "\(.owner.login)/\(.name) (\(if .isPrivate then "private" else "public" end))"' | sort)
 
     if [[ -z "$repos" ]]; then
         log_error "No repositories found"
@@ -313,6 +364,61 @@ get_github_token() {
     echo "$token"
 }
 
+# Make HTTP request using available tools
+http_request() {
+    local method="$1"
+    local url="$2"
+    local data="$3"
+    local token="$4"
+    
+    # Try to use curl if available, otherwise fallback to wget or native methods
+    if command -v curl &>/dev/null; then
+        local response
+        response=$(curl -s -w "\n%{http_code}" \
+            -X "$method" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $token" \
+            ${data:+-d "$data"} \
+            "$url" 2>/dev/null)
+        echo "$response"
+    elif command -v wget &>/dev/null; then
+        local tmpfile=$(mktemp)
+        local http_code
+        if wget -q -O "$tmpfile" \
+            --method="$method" \
+            --header="Content-Type: application/json" \
+            --header="Authorization: Bearer $token" \
+            ${data:+--body-data="$data"} \
+            --server-response \
+            "$url" 2>&1 | grep "HTTP/" | tail -1 | awk '{print $2}' > "${tmpfile}.code"; then
+            http_code=$(cat "${tmpfile}.code")
+        else
+            http_code="000"
+        fi
+        cat "$tmpfile"
+        echo "$http_code"
+        rm -f "$tmpfile" "${tmpfile}.code"
+    else
+        # Fallback: use gh api for GitHub endpoints or basic HTTP with /dev/tcp
+        log_error "No HTTP client available (curl or wget required)"
+        return 1
+    fi
+}
+
+# Parse JSON value using shell
+json_get() {
+    local json="$1"
+    local key="$2"
+    echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/"
+}
+
+# Parse JSON array using shell
+json_get_array() {
+    local json="$1"
+    local key="$2"
+    echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" | tr ',' '\n' | tr -d '[]" '
+}
+
 # Provision secrets for a repository
 provision_repository() {
     local repo="$1"
@@ -333,37 +439,29 @@ provision_repository() {
 
     spin_start "Provisioning secrets for $repo"
 
-    local response curl_rc=0
-    response=$(curl -s -w "%{http_code}" \
-        -X POST \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $token" \
-        -d "{\"repository\": \"$repo\"}" \
-        "$WORKER_URL/api/cli-provision" 2>/dev/null) || curl_rc=$?
-
-    if [[ $curl_rc -ne 0 || -z "$response" ]]; then
+    local response
+    response=$(http_request "POST" "$WORKER_URL/api/cli-provision" "{\"repository\": \"$repo\"}" "$token")
+    
+    if [[ -z "$response" ]]; then
         spin_stop 1 "Network error while provisioning $repo"
-        log_error "curl failed with exit code $curl_rc"
         emit_json_repo_result "$repo" false "0" "null"
         return 1
     fi
 
-    local http_code="${response: -3}"
-    local body="${response%???}"
+    # Extract HTTP code (last line) and body (everything else)
+    local http_code=$(echo "$response" | tail -1)
+    local body=$(echo "$response" | sed '$d')
 
     case "$http_code" in
         200|201)
             spin_stop 0 "Successfully provisioned secrets for $repo"
-            local secrets_json
-            secrets_json=$(echo "$body" | jq -c '.secrets // []' 2>/dev/null || echo '[]')
-            if [[ -n "$body" ]] && echo "$body" | jq . &> /dev/null; then
-                local secrets_list
-                secrets_list=$(echo "$body" | jq -r '.secrets[]? // empty' 2>/dev/null || echo "")
-                if [[ -n "$secrets_list" ]]; then
-                    log_info "Provisioned secrets: $(echo "$secrets_list" | tr '\n' ' ')"
-                fi
+            # Try to parse secrets from response
+            local secrets_list
+            secrets_list=$(json_get_array "$body" "secrets")
+            if [[ -n "$secrets_list" ]]; then
+                log_info "Provisioned secrets: $secrets_list"
             fi
-            emit_json_repo_result "$repo" true "$http_code" "$secrets_json"
+            emit_json_repo_result "$repo" true "$http_code" "[]"
             return 0
             ;;
         401)
@@ -472,7 +570,7 @@ cmd_status() {
     exit ${EXIT_OK}
   fi
   local resp rc=0
-  resp=$(curl -s -w "\n%{http_code}" "$WORKER_URL/health" 2>/dev/null) || rc=$?
+  resp=$(http_request "GET" "$WORKER_URL/health" "" "") || rc=$?
   if [[ $rc -ne 0 || -z "$resp" ]]; then
     log_error "Network error contacting health endpoint"
     emit_json_status 0 'null'
@@ -508,7 +606,13 @@ cmd_config() {
       path=$(resolve_config_path || true)
       if [[ -n "$path" ]]; then
         log_info "Using config: $path"
-        if is_json; then jq -Rn --rawfile f "$path" '{path: env.fpath, content: $f}' 2>/dev/null || cat "$path"; else cat "$path"; fi
+        if is_json; then
+          local content
+          content=$(json_escape "$(cat "$path")")
+          printf '{"path":"%s","content":"%s"}\n' "$(json_escape "$path")" "$content"
+        else
+          cat "$path"
+        fi
       else
         log_warning "No config file found"
       fi
@@ -524,7 +628,12 @@ cmd_config() {
       mkdir -p "$(dirname "$path")"
       # update or append
       if grep -qi "^$key=" "$path" 2>/dev/null; then
-        sed -i.bak "s|^$key=.*|$key=$value|i" "$path"
+        # Cross-platform sed
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+          sed -i '' "s|^$key=.*|$key=$value|i" "$path"
+        else
+          sed -i "s|^$key=.*|$key=$value|i" "$path"
+        fi
       else
         echo "$key=$value" >> "$path"
       fi
@@ -552,11 +661,8 @@ cmd_remote_exec() {
     exit ${EXIT_OK}
   fi
   local resp rc=0
-  resp=$(curl -s -w "\n%{http_code}" \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -d "{\"command\":\"$cmd_str\",\"os\":\"$os\",\"arch\":\"$arch\"}" \
-    "$WORKER_URL/api/exec" 2>/dev/null) || rc=$?
+  local json_data="{\"command\":\"$(json_escape "$cmd_str")\",\"os\":\"$(json_escape "$os")\",\"arch\":\"$(json_escape "$arch")\"}"
+  resp=$(http_request "POST" "$WORKER_URL/api/exec" "$json_data" "") || rc=$?
   if [[ $rc -ne 0 || -z "$resp" ]]; then
     log_error "Network error calling remote exec"
     emit_json_status 0 'null'
@@ -624,8 +730,7 @@ EXAMPLES:
 
 SETUP:
     1. Install GitHub CLI: https://cli.github.com/
-    2. Install jq: https://stedolan.github.io/jq/
-    3. Authenticate: gh auth login
+    2. Authenticate: gh auth login
 
 This tool provisions the following secrets per repository:
     GREENER_CI_KEY, GREENER_CI_SECRET, GREENER_API_TOKEN, GREENER_APP_ID, GREENER_INSTALLATION_ID
@@ -700,7 +805,7 @@ main() {
     done
 
     # Header
-    log_header "🌱 Greener CI/CD Secret Provisioning (v${VERSION})"
+    log_header "Greener CI/CD Secret Provisioning (v${VERSION})"
 
     # Check prerequisites
     check_prerequisites
@@ -791,7 +896,8 @@ main() {
     esac
 
     # Provision default flow
-    log_header "\xF0\x9F\x8C\xB1 Greener CI/CD Secret Provisioning (v${VERSION})"
+    # Use simple ASCII for better cross-platform support
+    log_header "Greener CI/CD Secret Provisioning (v${VERSION})"
     check_prerequisites
 
     local repositories=()
