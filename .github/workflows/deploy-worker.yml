@@ -18,43 +18,28 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 2
     if: github.repository == 'greener-hayden/greenerCICD'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
         with:
-          node-version: '20'
-
-      - name: Install wrangler
-        run: npm install -g wrangler
-
-      - name: Deploy to Cloudflare Workers
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          environment: production
+          secrets: |
+            GITHUB_TOKEN
+            WEBHOOK_SECRET
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+
+      - name: Deployment summary
         run: |
-          # Set secrets in Cloudflare Worker
-          echo "Setting worker secrets..."
-          echo "${{ secrets.GITHUB_TOKEN }}" | wrangler secret put GITHUB_TOKEN --env production
-
-          # Set webhook secret if provided
-          if [ -n "${{ secrets.GITHUB_WEBHOOK_SECRET }}" ]; then
-            echo "${{ secrets.GITHUB_WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET --env production
-          fi
-
-          # Deploy worker
-          echo "Deploying worker..."
-          wrangler deploy --env production
-
-      - name: Get worker URL
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          WORKER_URL=$(wrangler whoami 2>/dev/null | grep -o 'https://[^[:space:]]*' || echo "Check Cloudflare dashboard for URL")
           echo "### ✅ Worker Deployed" >> $GITHUB_STEP_SUMMARY
-          echo "**Webhook URL**: Set this in your GitHub App webhook settings" >> $GITHUB_STEP_SUMMARY
           echo "**Worker Name**: greener-cicd-webhook-proxy" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: production" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Step**: Set worker URL in GitHub App webhook settings" >> $GITHUB_STEP_SUMMARY
