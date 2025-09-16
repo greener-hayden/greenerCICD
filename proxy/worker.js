@@ -1139,7 +1139,8 @@ async function setRepoSecret(repoFullName, secretName, secretValue) {
 
 // Generate random secret
 function generateSecret(length) {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  // Use only lowercase letters and digits to avoid case-sensitive confusion
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < length; i++) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
