@@ -10,7 +10,7 @@ WORKER_URL="https://greener-cicd-webhook-proxy.workers.dev"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # CLI metadata
-VERSION="0.5.0"
+VERSION="0.6.0"
 CLI_NAME="greener-provision"
 HOMEPAGE="https://github.com/greener-hayden/greenerCICD"
 
@@ -38,19 +38,80 @@ detect_os() {
 
 OS_TYPE=$(detect_os)
 
-# Terminal capability detection
+# Terminal and UI configuration
 UI_MODE="auto"  # auto|rich|minimal|ci
 SUPPORTS_UNICODE=false
 SUPPORTS_ANSI=false
 IS_INTERACTIVE=false
+UI_CONFIG_CACHED=false
 
-detect_terminal_capabilities() {
+# Fetch UI configuration from worker (with fallback)
+fetch_ui_config() {
+  # Skip if already configured or in offline mode
+  if [[ "$UI_CONFIG_CACHED" == "true" ]] || [[ -n "${OFFLINE_MODE:-}" ]]; then
+    return
+  fi
+  
+  # Quick local detection for fallback
+  local is_interactive=false
+  [[ -t 0 && -t 1 ]] && is_interactive=true
+  
+  local can_unicode=false
+  if echo -e "\u2713" | grep -q "✓" 2>/dev/null; then
+    can_unicode=true
+  fi
+  
+  # Prepare terminal info for worker
+  local terminal_info="{
+    \"os\": \"$OS_TYPE\",
+    \"terminal\": {
+      \"isInteractive\": $is_interactive,
+      \"isTTY\": $([[ -t 1 ]] && echo "true" || echo "false"),
+      \"term\": \"${TERM:-dumb}\",
+      \"canRenderUnicode\": $can_unicode
+    },
+    \"env\": {
+      \"CI\": \"${CI:-}\",
+      \"GITHUB_ACTIONS\": \"${GITHUB_ACTIONS:-}\",
+      \"NO_COLOR\": \"${NO_COLOR:-}\",
+      \"WT_SESSION\": \"${WT_SESSION:-}\",
+      \"MSYSTEM\": \"${MSYSTEM:-}\",
+      \"WSL_DISTRO_NAME\": \"${WSL_DISTRO_NAME:-}\"
+    },
+    \"locale\": \"${LANG:-${LC_ALL:-en_US}}\"
+  }"
+  
+  # Try to get config from worker (timeout quickly)
+  local config_response
+  if command -v curl &>/dev/null; then
+    config_response=$(curl -s --max-time 2 -X POST "$WORKER_URL/api/ui-config" \
+      -H "Content-Type: application/json" \
+      -d "$terminal_info" 2>/dev/null || echo "")
+  elif command -v wget &>/dev/null; then
+    config_response=$(wget -q --timeout=2 -O- --post-data="$terminal_info" \
+      --header="Content-Type: application/json" \
+      "$WORKER_URL/api/ui-config" 2>/dev/null || echo "")
+  fi
+  
+  # Parse response if successful
+  if [[ -n "$config_response" ]]; then
+    UI_MODE=$(json_get "$config_response" "uiMode" || echo "ci")
+    local caps=$(json_get "$config_response" "capabilities" || echo "{}")
+    SUPPORTS_UNICODE=$(json_get "$caps" "unicode" || echo "false")
+    SUPPORTS_ANSI=$(json_get "$caps" "ansi" || echo "false")
+    IS_INTERACTIVE=$(json_get "$caps" "interactive" || echo "false")
+    UI_CONFIG_CACHED=true
+    return
+  fi
+  
+  # Fallback to local detection if worker unavailable
+  detect_terminal_capabilities_fallback
+}
+
+# Fallback terminal detection (when worker unavailable)
+detect_terminal_capabilities_fallback() {
   # Check if running in CI environment
-  if [[ -n "${CI:-}" ]] || [[ -n "${CONTINUOUS_INTEGRATION:-}" ]] || 
-     [[ -n "${GITHUB_ACTIONS:-}" ]] || [[ -n "${JENKINS_URL:-}" ]] || 
-     [[ -n "${TRAVIS:-}" ]] || [[ -n "${CIRCLECI:-}" ]] || 
-     [[ -n "${GITLAB_CI:-}" ]] || [[ -n "${BUILDKITE:-}" ]];
-  then
+  if [[ -n "${CI:-}" ]] || [[ -n "${GITHUB_ACTIONS:-}" ]]; then
     UI_MODE="ci"
     return
   fi
@@ -68,27 +129,13 @@ detect_terminal_capabilities() {
   fi
 
   # Check Unicode support
-  if [[ "${LANG:-}" == *"UTF-8"* ]] || [[ "${LC_ALL:-}" == *"UTF-8"* ]] || 
-     [[ "${LC_CTYPE:-}" == *"UTF-8"* ]];
-  then
-    # Test if we can actually display Unicode
+  if [[ "${LANG:-}" == *"UTF-8"* ]] || [[ "${LC_ALL:-}" == *"UTF-8"* ]]; then
     if echo -e "\u2713" | grep -q "✓" 2>/dev/null; then
       SUPPORTS_UNICODE=true
     fi
   fi
 
-  # Windows-specific checks
-  if [[ "$OS_TYPE" == "windows" ]]; then
-    if [[ -n "${WT_SESSION:-}" ]] || [[ -n "${MSYSTEM:-}" ]] || [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
-      SUPPORTS_UNICODE=true
-      SUPPORTS_ANSI=true
-    else
-      SUPPORTS_UNICODE=false
-      SUPPORTS_ANSI=false
-    fi
-  fi
-
-  # Determine UI mode based on capabilities
+  # Determine UI mode
   if [[ "$UI_MODE" == "auto" ]]; then
     if [[ "$SUPPORTS_UNICODE" == "true" && "$SUPPORTS_ANSI" == "true" && "$IS_INTERACTIVE" == "true" ]]; then
       UI_MODE="rich"
@@ -100,90 +147,59 @@ detect_terminal_capabilities() {
   fi
 }
 
-detect_terminal_capabilities
+# Initialize UI configuration
+fetch_ui_config
 
-# Visual elements and sprites
+# Visual elements and sprites (simplified)
 declare -A SPRITES
 declare -A ICONS
 
 init_visual_elements() {
+  # Simple defaults for offline mode
   case "$UI_MODE" in
     rich)
-      # Rich mode with Unicode sprites and icons
       SPRITES["rocket"]="🚀"
       SPRITES["package"]="📦"
       SPRITES["key"]="🔑"
-      SPRITES["lock"]="🔒"
       SPRITES["shield"]="🛡️"
-      SPRITES["cloud"]="☁️"
       SPRITES["gear"]="⚙️"
-      SPRITES["sparkle"]="✨"
       SPRITES["check"]="✅"
-      SPRITES["cross"]="❌"
       SPRITES["warning"]="⚠️"
-      SPRITES["info"]="ℹ️"
-      SPRITES["bulb"]="💡"
-      SPRITES["globe"]="🌍"
-      SPRITES["bot"]="🤖"
-      
+      SPRITES["sparkle"]="✨"
       ICONS["success"]="✓"
       ICONS["error"]="✗"
-      ICONS["warning"]="⚠"
       ICONS["info"]="ℹ"
       ICONS["arrow"]="→"
-      ICONS["bullet"]="•"
       ICONS["progress"]="▶"
       ;;
     minimal)
-      # Minimal mode with basic Unicode
       SPRITES["rocket"]=">"
       SPRITES["package"]="[]"
       SPRITES["key"]="*"
-      SPRITES["lock"]="#"
       SPRITES["shield"]="+"
-      SPRITES["cloud"]="~"
       SPRITES["gear"]="@"
-      SPRITES["sparkle"]="*"
       SPRITES["check"]="✓"
-      SPRITES["cross"]="✗"
       SPRITES["warning"]="!"
-      SPRITES["info"]="i"
-      SPRITES["bulb"]="?"
-      SPRITES["globe"]="o"
-      SPRITES["bot"]="&"
-      
+      SPRITES["sparkle"]="*"
       ICONS["success"]="✓"
       ICONS["error"]="✗"
-      ICONS["warning"]="!"
       ICONS["info"]="i"
       ICONS["arrow"]=">"
-      ICONS["bullet"]="-"
       ICONS["progress"]=">"
       ;;
     ci|*)
-      # CI mode with ASCII only
       SPRITES["rocket"]="[RUN]"
       SPRITES["package"]="[PKG]"
       SPRITES["key"]="[KEY]"
-      SPRITES["lock"]="[SEC]"
       SPRITES["shield"]="[PRO]"
-      SPRITES["cloud"]="[API]"
       SPRITES["gear"]="[CFG]"
-      SPRITES["sparkle"]="[NEW]"
       SPRITES["check"]="[OK]"
-      SPRITES["cross"]="[ERR]"
       SPRITES["warning"]="[WRN]"
-      SPRITES["info"]="[INF]"
-      SPRITES["bulb"]="[TIP]"
-      SPRITES["globe"]="[WEB]"
-      SPRITES["bot"]="[BOT]"
-      
+      SPRITES["sparkle"]="[NEW]"
       ICONS["success"]="[OK]"
       ICONS["error"]="[ERR]"
-      ICONS["warning"]="[WRN]"
       ICONS["info"]="[INF]"
       ICONS["arrow"]="->"
-      ICONS["bullet"]="*"
       ICONS["progress"]="=>"
       ;;
   esac
@@ -271,38 +287,23 @@ SPINNER_START_TIME=""
 SPINNER_MESSAGE=""
 PROGRESS_DATA=""
 
-# Rich spinner frames based on UI mode
+# Simplified spinner frames
 get_spinner_frames() {
   case "$UI_MODE" in
-    rich)
-      # Multiple spinner styles for rich mode
-      case "${SPINNER_STYLE:-dots}" in
-        dots) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
-        circle) echo "◐ ◓ ◑ ◒" ;;
-        bar) echo "▉▊▋▌▍▎▏▎▍▌▋▊▉" ;;
-        pulse) echo "⣾ ⣽ ⣻ ⢿ ⡿ ⣟ ⣯ ⣷" ;;
-        globe) echo "🌍 🌎 🌏" ;;
-        clock) echo "🕐 🕑 🕒 🕓 🕔 🕕 🕖 🕗 🕘 🕙 🕚 🕛" ;;
-        *) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
-      esac
-      ;;
-    minimal)
-      echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏"
-      ;;
-    ci|*)
-      echo "- \\ | /"
-      ;;
+    rich) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
+    minimal) echo "⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏" ;;
+    ci|*) echo "- \\ | /" ;;
   esac
 }
 
-# Update progress data (for rich mode)
+# Simplified progress tracking
 update_progress() {
-  PROGRESS_DATA="$1"
+  # Progress tracking moved to worker
+  return 0
 }
 
 spin_start() {
   local msg="$1"
-  local style="${2:-dots}"
   [[ ${LOG_LEVEL} -lt 3 ]] && return 0
   [[ "$OUTPUT_MODE" == "json" ]] && return 0
   
@@ -315,9 +316,7 @@ spin_start() {
   [[ ! -t 1 ]] && return 0
   
   SPINNER_MESSAGE="$msg"
-  SPINNER_START_TIME=$(date +%s)
-  SPINNER_STYLE="$style"
-  PROGRESS_DATA=""
+  SPINNER_START_TIME=$(date +%s 2>/dev/null || echo "0")
   
   local frames_str
   frames_str=$(get_spinner_frames)
@@ -326,24 +325,8 @@ spin_start() {
   local i=0
   {
     while true; do
-      local elapsed_time=""
-      if [[ "$UI_MODE" == "rich" ]] && [[ -n "$SPINNER_START_TIME" ]]; then
-        local current_time
-        current_time=$(date +%s)
-        local elapsed=$((current_time - SPINNER_START_TIME))
-        if [[ $elapsed -ge 2 ]]; then
-          elapsed_time=" ${DIM}[${elapsed}s]${NC}"
-        fi
-      fi
-      
-      local progress_indicator=""
-      if [[ -n "$PROGRESS_DATA" ]]; then
-        progress_indicator=" ${CYAN}${PROGRESS_DATA}${NC}"
-      fi
-      
-      # Clear line and print spinner with optional data
-      printf "\r\033[K${BLUE}%s${NC} %s%s%s" "${frames[i]}" "${SPINNER_MESSAGE}" "${progress_indicator}" "${elapsed_time}"
-      
+      # Simple spinner without complex timing
+      printf "\r\033[K${BLUE}%s${NC} %s" "${frames[i]}" "${SPINNER_MESSAGE}"
       i=$(( (i+1) % ${#frames[@]} ))
       sleep 0.1
     done
@@ -354,7 +337,6 @@ spin_start() {
 spin_stop() {
   local status="$1" # 0=success else error
   local msg="$2"
-  local extra_info="${3:-}"
   
   [[ -n "${SPINNER_PID}" ]] && kill "${SPINNER_PID}" >/dev/null 2>&1 || true
   SPINNER_PID=""
@@ -367,36 +349,22 @@ spin_stop() {
       else
         echo "${ICONS[error]} $msg" >&2
       fi
-      [[ -n "$extra_info" ]] && echo "  $extra_info"
     fi
     return
   fi
   
   # Rich/minimal modes
   if [[ ${LOG_LEVEL} -ge 3 ]]; then
-    local elapsed_str=""
-    if [[ "$UI_MODE" == "rich" ]] && [[ -n "$SPINNER_START_TIME" ]]; then
-      local end_time
-      end_time=$(date +%s)
-      local total_elapsed=$((end_time - SPINNER_START_TIME))
-      if [[ $total_elapsed -ge 1 ]]; then
-        elapsed_str=" ${DIM}(${total_elapsed}s)${NC}"
-      fi
-    fi
-    
     # Clear line and print final status
     if [[ "$status" -eq 0 ]]; then
-      printf "\r\033[K${GREEN}${ICONS[success]}${NC} %s%s\n" "$msg" "$elapsed_str"
-      [[ -n "$extra_info" ]] && echo "  ${DIM}${extra_info}${NC}"
+      printf "\r\033[K${GREEN}${ICONS[success]}${NC} %s\n" "$msg"
     else
-      printf "\r\033[K${RED}${ICONS[error]}${NC} %s%s\n" "$msg" "$elapsed_str" >&2
-      [[ -n "$extra_info" ]] && echo "  ${YELLOW}${extra_info}${NC}" >&2
+      printf "\r\033[K${RED}${ICONS[error]}${NC} %s\n" "$msg" >&2
     fi
   fi
   
   SPINNER_START_TIME=""
   SPINNER_MESSAGE=""
-  PROGRESS_DATA=""
 }
 
 # Prompt utilities
@@ -556,15 +524,13 @@ get_repositories() {
         log_header "Fetching Your Repositories"
     fi
 
-    spin_start "Loading repository list from GitHub" "globe"
-    update_progress "[0/100]"
+    spin_start "Loading repository list from GitHub"
     
     local repos
     repos=$(gh repo list --limit 100 --json name,owner,isPrivate,pushedAt --jq '.[] | "\(.owner.login)/\(.name) (\(if .isPrivate then "private" else "public" end))"' | sort)
     
     local repo_count
     repo_count=$(echo "$repos" | wc -l | tr -d ' ')
-    update_progress "[${repo_count}/100]"
 
     if [[ -z "$repos" ]]; then
         spin_stop 1 "No repositories found"
@@ -766,13 +732,10 @@ provision_repository() {
     else
         spinner_msg="Provisioning secrets for $repo"
     fi
-    spin_start "$spinner_msg" "pulse"
-    update_progress "[Connecting]"
-
-    update_progress "[Sending request]"
+    spin_start "$spinner_msg"
+    
     local response
     response=$(http_request "POST" "$WORKER_URL/api/cli-provision" "{\"repository\": \"$repo\"}" "$token")
-    update_progress "[Processing]"
     
     if [[ -z "$response" ]]; then
         spin_stop 1 "Network error while provisioning $repo"
@@ -937,7 +900,7 @@ os_arch() {
   uname -m 2>/dev/null || echo ""
 }
 
-# Status command
+# Status command (simplified with /health endpoint)
 cmd_status() {
   if [[ "$DRY_RUN" == "true" ]]; then
     log_info "[dry-run] Would GET $WORKER_URL/health"

@@ -40,6 +40,8 @@ async function handleRequest(request, env, ctx) {
         return request.method === 'POST' 
           ? handleWebhook(request, validatedEnv) 
           : cachedGet(request, 300, () => handleHome(validatedEnv));
+      case '/health':
+        return handleHealth();
       case '/configure':
         return handleConfigure(url.searchParams, validatedEnv);
       case '/admin':
@@ -54,6 +56,10 @@ async function handleRequest(request, env, ctx) {
       case '/api/cli-provision':
         return request.method === 'POST'
           ? handleCliProvision(request, validatedEnv)
+          : methodNotAllowed();
+      case '/api/ui-config':
+        return request.method === 'POST'
+          ? handleUiConfig(request)
           : methodNotAllowed();
       case '/api/analytics':
         return handleAnalytics(url.searchParams, validatedEnv);
@@ -737,6 +743,279 @@ async function handleGetRepos(params, env) {
   return new Response(JSON.stringify(repos), {
     headers: { 'Content-Type': 'application/json' }
   });
+}
+
+/**
+ * Handle health check endpoint
+ */
+function handleHealth() {
+  return new Response(JSON.stringify({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    worker: 'greener-cicd',
+    version: '1.0.0'
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * Handle UI configuration endpoint for CLI
+ */
+async function handleUiConfig(request) {
+  try {
+    const payload = await readJson(request);
+    
+    // Extract terminal capabilities from request
+    const {
+      os = 'unknown',
+      terminal = {},
+      env = {},
+      locale = 'en_US'
+    } = payload;
+
+    // Determine UI mode based on capabilities
+    let uiMode = 'ci';  // Default to most conservative
+    let supportsUnicode = false;
+    let supportsAnsi = false;
+    
+    // Check for CI environments
+    const ciEnvVars = ['CI', 'CONTINUOUS_INTEGRATION', 'GITHUB_ACTIONS', 'JENKINS_URL', 
+                       'TRAVIS', 'CIRCLECI', 'GITLAB_CI', 'BUILDKITE', 'TEAMCITY_VERSION',
+                       'DRONE', 'CODEBUILD_BUILD_ID', 'BITBUCKET_BUILD_NUMBER'];
+    const isCI = ciEnvVars.some(v => env[v]);
+    
+    if (!isCI) {
+      // Check terminal capabilities
+      const isInteractive = terminal.isInteractive || false;
+      const termType = terminal.term || 'dumb';
+      const noColor = env.NO_COLOR;
+      
+      // Check ANSI support
+      if (!noColor && termType !== 'dumb' && terminal.isTTY) {
+        supportsAnsi = true;
+      }
+      
+      // Check Unicode support
+      if ((locale.includes('UTF-8') || locale.includes('utf8')) && terminal.canRenderUnicode) {
+        supportsUnicode = true;
+      }
+      
+      // Windows-specific checks
+      if (os === 'windows') {
+        if (env.WT_SESSION || env.MSYSTEM || env.WSL_DISTRO_NAME) {
+          supportsUnicode = true;
+          supportsAnsi = true;
+        } else {
+          supportsUnicode = false;
+          supportsAnsi = false;
+        }
+      }
+      
+      // Determine UI mode
+      if (supportsUnicode && supportsAnsi && isInteractive) {
+        uiMode = 'rich';
+      } else if (supportsAnsi) {
+        uiMode = 'minimal';
+      }
+    }
+    
+    // Build response with visual elements
+    const config = {
+      uiMode,
+      capabilities: {
+        unicode: supportsUnicode,
+        ansi: supportsAnsi,
+        interactive: terminal.isInteractive || false
+      },
+      sprites: getSpritesForMode(uiMode),
+      icons: getIconsForMode(uiMode),
+      colors: getColorsForMode(uiMode, supportsAnsi),
+      spinners: getSpinnersForMode(uiMode)
+    };
+    
+    return new Response(JSON.stringify(config), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+  } catch (error) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: error.message
+    }), {
+      status: error instanceof Response ? error.status : 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+/**
+ * Get sprites configuration for UI mode
+ */
+function getSpritesForMode(mode) {
+  switch (mode) {
+    case 'rich':
+      return {
+        rocket: '🚀',
+        package: '📦',
+        key: '🔑',
+        lock: '🔒',
+        shield: '🛡️',
+        cloud: '☁️',
+        gear: '⚙️',
+        sparkle: '✨',
+        check: '✅',
+        cross: '❌',
+        warning: '⚠️',
+        info: 'ℹ️',
+        bulb: '💡',
+        globe: '🌍',
+        bot: '🤖'
+      };
+    case 'minimal':
+      return {
+        rocket: '>',
+        package: '[]',
+        key: '*',
+        lock: '#',
+        shield: '+',
+        cloud: '~',
+        gear: '@',
+        sparkle: '*',
+        check: '✓',
+        cross: '✗',
+        warning: '!',
+        info: 'i',
+        bulb: '?',
+        globe: 'o',
+        bot: '&'
+      };
+    default: // CI mode
+      return {
+        rocket: '[RUN]',
+        package: '[PKG]',
+        key: '[KEY]',
+        lock: '[SEC]',
+        shield: '[PRO]',
+        cloud: '[API]',
+        gear: '[CFG]',
+        sparkle: '[NEW]',
+        check: '[OK]',
+        cross: '[ERR]',
+        warning: '[WRN]',
+        info: '[INF]',
+        bulb: '[TIP]',
+        globe: '[WEB]',
+        bot: '[BOT]'
+      };
+  }
+}
+
+/**
+ * Get icons configuration for UI mode
+ */
+function getIconsForMode(mode) {
+  switch (mode) {
+    case 'rich':
+      return {
+        success: '✓',
+        error: '✗',
+        warning: '⚠',
+        info: 'ℹ',
+        arrow: '→',
+        bullet: '•',
+        progress: '▶'
+      };
+    case 'minimal':
+      return {
+        success: '✓',
+        error: '✗',
+        warning: '!',
+        info: 'i',
+        arrow: '>',
+        bullet: '-',
+        progress: '>'
+      };
+    default: // CI mode
+      return {
+        success: '[OK]',
+        error: '[ERR]',
+        warning: '[WRN]',
+        info: '[INF]',
+        arrow: '->',
+        bullet: '*',
+        progress: '=>'
+      };
+  }
+}
+
+/**
+ * Get color configuration for UI mode
+ */
+function getColorsForMode(mode, supportsAnsi) {
+  if (mode === 'ci' || !supportsAnsi) {
+    return {
+      red: '',
+      green: '',
+      yellow: '',
+      blue: '',
+      purple: '',
+      cyan: '',
+      bold: '',
+      dim: '',
+      underline: '',
+      reset: ''
+    };
+  }
+  
+  const colors = {
+    red: '\x1b[0;31m',
+    green: '\x1b[0;32m',
+    yellow: '\x1b[1;33m',
+    blue: '\x1b[0;34m',
+    bold: '\x1b[1m',
+    dim: '\x1b[2m',
+    reset: '\x1b[0m'
+  };
+  
+  if (mode === 'rich') {
+    colors.purple = '\x1b[0;35m';
+    colors.cyan = '\x1b[0;36m';
+    colors.underline = '\x1b[4m';
+  } else {
+    colors.purple = '';
+    colors.cyan = '';
+    colors.underline = '';
+  }
+  
+  return colors;
+}
+
+/**
+ * Get spinner configuration for UI mode
+ */
+function getSpinnersForMode(mode) {
+  switch (mode) {
+    case 'rich':
+      return {
+        dots: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
+        circle: ['◐', '◓', '◑', '◒'],
+        bar: ['▉', '▊', '▋', '▌', '▍', '▎', '▏', '▎', '▍', '▌', '▋', '▊', '▉'],
+        pulse: ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'],
+        globe: ['🌍', '🌎', '🌏'],
+        clock: ['🕐', '🕑', '🕒', '🕓', '🕔', '🕕', '🕖', '🕗', '🕘', '🕙', '🕚', '🕛']
+      };
+    case 'minimal':
+      return {
+        default: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+      };
+    default: // CI mode
+      return {
+        default: ['-', '\\', '|', '/']
+      };
+  }
 }
 
 /**
