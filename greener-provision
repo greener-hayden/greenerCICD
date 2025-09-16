@@ -659,16 +659,31 @@ http_request() {
     elif command -v wget &>/dev/null; then
         local tmpfile=$(mktemp)
         local http_code
-        if wget -q -O "$tmpfile" \
-            --method="$method" \
-            --header="Content-Type: application/json" \
-            --header="Authorization: Bearer $token" \
-            ${data:+--body-data="$data"} \
-            --server-response \
-            "$url" 2>&1 | grep "HTTP/" | tail -1 | awk '{print $2}' > "${tmpfile}.code"; then
-            http_code=$(cat "${tmpfile}.code")
+        if [[ "$method" == "POST" ]]; then
+            if wget -q --header="Content-Type: application/json" \
+                --header="Authorization: Bearer $token" \
+                --post-data="$data" \
+                --server-response \
+                -O "$tmpfile" \
+                "$url" 2>&1 | grep "HTTP/" | tail -1 | awk '{print $2}' > "${tmpfile}.code"; then
+                http_code=$(cat "${tmpfile}.code")
+            else
+                http_code="000"
+            fi
+        elif [[ "$method" == "GET" ]]; then
+            if wget -q --header="Content-Type: application/json" \
+                --header="Authorization: Bearer $token" \
+                --server-response \
+                -O "$tmpfile" \
+                "$url" 2>&1 | grep "HTTP/" | tail -1 | awk '{print $2}' > "${tmpfile}.code"; then
+                http_code=$(cat "${tmpfile}.code")
+            else
+                http_code="000"
+            fi
         else
-            http_code="000"
+            log_error "wget fallback only supports GET and POST methods"
+            rm -f "$tmpfile" "${tmpfile}.code"
+            return 1
         fi
         cat "$tmpfile"
         echo "$http_code"
@@ -680,18 +695,50 @@ http_request() {
     fi
 }
 
-# Parse JSON value using shell
+# Parse JSON value using shell (handles string, boolean, number, and null values)
 json_get() {
     local json="$1"
     local key="$2"
-    echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | sed "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/"
+    # Try gh --jq if available for better parsing
+    if command -v gh &>/dev/null; then
+        echo "$json" | gh api --input - --jq ".$key // empty" 2>/dev/null || {
+            # Fallback to regex for simple cases
+            echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" ||
+            echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" | tr -d ' '
+        }
+    else
+        # First try quoted string values
+        local result
+        result=$(echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p")
+        if [[ -n "$result" ]]; then
+            echo "$result"
+        else
+            # Try unquoted values (boolean, number, null)
+            echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" | tr -d ' '
+        fi
+    fi
 }
 
-# Parse JSON array using shell
+# Parse JSON array using shell (improved robustness)
 json_get_array() {
     local json="$1"
     local key="$2"
-    echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" | tr ',' '\n' | tr -d '[]" '
+    # Try gh --jq if available for better parsing
+    if command -v gh &>/dev/null; then
+        echo "$json" | gh api --input - --jq ".${key}[]? // empty" 2>/dev/null || {
+            # Fallback to simple regex for basic arrays
+            echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p" | tr ',' '\n' | tr -d '[]" ' | grep -v '^$'
+        }
+    else
+        # Basic parsing for simple string arrays
+        # This handles ["value1", "value2"] format
+        local array_content
+        array_content=$(echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p")
+        if [[ -n "$array_content" ]]; then
+            # Extract quoted strings from array
+            echo "$array_content" | grep -o '"[^"]*"' | tr -d '"'
+        fi
+    fi
 }
 
 # Provision secrets for a repository
@@ -751,7 +798,22 @@ provision_repository() {
                 fi
             fi
             spin_stop 0 "Successfully provisioned secrets for $repo" "$secret_info"
-            emit_json_repo_result "$repo" true "$http_code" "[]"
+            # Convert secrets_list to JSON array format
+            local secrets_json="[]"
+            if [[ -n "$secrets_list" ]]; then
+                # Format as JSON array
+                secrets_json="["
+                local first=true
+                while IFS= read -r secret; do
+                    if [[ -n "$secret" ]]; then
+                        [[ "$first" == "false" ]] && secrets_json="${secrets_json},"
+                        secrets_json="${secrets_json}\"$(json_escape "$secret")\""
+                        first=false
+                    fi
+                done <<< "$secrets_list"
+                secrets_json="${secrets_json}]"
+            fi
+            emit_json_repo_result "$repo" true "$http_code" "$secrets_json"
             return 0
             ;;
         401)
@@ -942,7 +1004,7 @@ cmd_config() {
       # update or append
       if grep -qi "^$key=" "$path" 2>/dev/null; then
         # Cross-platform sed
-        if [[ "$OSTYPE" == "darwin"* ]]; then
+        if [[ "$OS_TYPE" == "macos" ]]; then
           sed -i '' "s|^$key=.*|$key=$value|i" "$path"
         else
           sed -i "s|^$key=.*|$key=$value|i" "$path"
