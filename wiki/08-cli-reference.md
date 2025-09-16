@@ -63,6 +63,42 @@ The script will:
 ./greener-provision --help
 ```
 
+
+### Commands
+- `provision` (default): Provision secrets to repositories
+- `status`: Check Cloudflare Worker health
+- `config [show|set]`: Manage CLI configuration file
+- `remote-exec -- CMD ARGS` (experimental): Execute a command remotely via the Worker (requires backend support)
+
+
+## Flags
+- `-r, --repos` Comma-separated repositories (owner/name)
+- `-i, --interactive` Interactive selection (default)
+- `-n, --non-interactive` Disable interactive prompts
+- `-y, --yes` Assume yes to confirmations
+- `-w, --worker-url URL` Override worker URL
+- `-c, --config PATH` Load configuration file
+- `--dry-run` Preview actions without performing network calls
+- `-o, --output MODE` Output format: `pretty` or `json`
+
+- `-v, --verbose` Increase verbosity (repeatable)
+- `-q, --quiet` Errors only
+- `--version` Print version
+- `-h, --help` Show help
+
+## Configuration File
+The CLI reads a config from `~/.config/greener/cli.conf` (or `$XDG_CONFIG_HOME/greener/cli.conf`). Example:
+```ini
+worker_url=https://greener-cicd-webhook-proxy.workers.dev
+log_level=3           # 0..4
+interactive=true      # or false
+color=never           # to disable colors
+```
+
+## Shell Completion
+- Bash: `source completions/greener-provision.bash`
+- Zsh: add `completions/` to your `fpath` and run `compinit`
+
 ## Provisioned Secrets
 
 Each repository receives these secrets:
@@ -126,6 +162,29 @@ $ ./greener-provision --repos "myorg/api,myorg/web"
 🔧 Provisioning CI/CD Secrets
 Worker URL: https://greener-cicd-webhook-proxy.workers.dev
 Repositories: 2
+
+
+### Status / Health Check
+```bash
+./greener-provision status
+```
+
+### JSON Output and Dry-Run
+```bash
+./greener-provision provision --dry-run -o json -r "org/repo"
+```
+
+### Config Management
+```bash
+./greener-provision config show
+./greener-provision config set worker_url https://your-worker.workers.dev
+```
+
+### Remote Execution (Experimental)
+```bash
+# Requires server-side support at /api/exec
+./greener-provision remote-exec -- echo hello
+```
 
 ℹ Provisioning secrets for myorg/api...
 ✓ Successfully provisioned secrets for myorg/api
