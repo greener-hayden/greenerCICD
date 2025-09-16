@@ -3,11 +3,25 @@ main = "proxy/worker-bundled.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# D1 Database binding (will be auto-populated by setup script)
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "greener-cicd-db"
+# database_id = "YOUR_DATABASE_ID_HERE"
+
 [env.production]
 name = "greener-cicd-webhook-proxy"
 
 [env.production.vars]
 GITHUB_OWNER = "greener-hayden"
+PROXY_URL = "https://greener-cicd-webhook-proxy.hg230.workers.dev"
+
+# Production D1 binding (will be auto-populated by setup script)
+# [env.production.d1_databases]
+# [[env.production.d1_databases]]
+# binding = "DB"
+# database_name = "greener-cicd-db"
+# database_id = "YOUR_DATABASE_ID_HERE"
 
 # Secrets (set via GitHub Action or wrangler CLI):
 # GITHUB_TOKEN - Personal access token with repo access
@@ -15,3 +29,4 @@ GITHUB_OWNER = "greener-hayden"
 # CLIENT_ID - GitHub App Client ID (for OAuth)
 # CLIENT_SECRET - GitHub App Client Secret (for OAuth)
 # WEBHOOK_SECRET - GitHub App webhook secret (optional)
+# MIGRATION_TOKEN - Token for migration worker authentication

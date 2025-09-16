@@ -1,0 +1,142 @@
+name: Deploy with Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'proxy/**'
+      - 'wrangler.toml'
+      - '.github/workflows/deploy-with-migrations.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy Worker with D1 Migrations
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install Wrangler
+        run: npm install -g wrangler
+      
+      - name: Authenticate Wrangler
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}" >> $GITHUB_ENV
+      
+      - name: Check D1 Database
+        id: check-db
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Check if database exists
+          if wrangler d1 list | grep -q "greener-cicd-db"; then
+            echo "Database exists"
+            echo "db_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Database does not exist"
+            echo "db_exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create D1 Database
+        if: steps.check-db.outputs.db_exists == 'false'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Create database and capture ID
+          OUTPUT=$(wrangler d1 create greener-cicd-db)
+          DB_ID=$(echo "$OUTPUT" | grep -oP 'database_id = "\K[^"]+')
+          
+          # Update wrangler.toml with database ID
+          echo "
+          [[d1_databases]]
+          binding = \"DB\"
+          database_name = \"greener-cicd-db\"
+          database_id = \"$DB_ID\"
+          
+          [env.production.d1_databases]
+          [[env.production.d1_databases]]
+          binding = \"DB\"
+          database_name = \"greener-cicd-db\"
+          database_id = \"$DB_ID\"
+          " >> wrangler.toml
+      
+      - name: Run Migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute greener-cicd-db --file=proxy/database/schema.sql
+      
+      - name: Bundle Worker
+        run: |
+          # Bundle the worker with all dependencies
+          npx esbuild proxy/worker.js \
+            --bundle \
+            --format=esm \
+            --platform=neutral \
+            --outfile=proxy/worker-bundled.js \
+            --external:cloudflare:* \
+            --minify
+      
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler deploy --env production
+      
+      - name: Deploy Migration Worker (Optional)
+        if: ${{ vars.DEPLOY_MIGRATION_WORKER == 'true' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Bundle migration worker
+          npx esbuild proxy/migration-worker.js \
+            --bundle \
+            --format=esm \
+            --platform=neutral \
+            --outfile=proxy/migration-worker-bundled.js \
+            --external:cloudflare:* \
+            --minify
+          
+          # Deploy with different name
+          wrangler deploy proxy/migration-worker-bundled.js \
+            --name greener-cicd-migrations \
+            --env production
+      
+      - name: Set Secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Set required secrets if they exist in GitHub secrets
+          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | wrangler secret put GITHUB_TOKEN --env production
+          fi
+          
+          if [ -n "${{ secrets.APP_ID }}" ]; then
+            echo "${{ secrets.APP_ID }}" | wrangler secret put APP_ID --env production
+          fi
+          
+          if [ -n "${{ secrets.CLIENT_ID }}" ]; then
+            echo "${{ secrets.CLIENT_ID }}" | wrangler secret put CLIENT_ID --env production
+          fi
+          
+          if [ -n "${{ secrets.CLIENT_SECRET }}" ]; then
+            echo "${{ secrets.CLIENT_SECRET }}" | wrangler secret put CLIENT_SECRET --env production
+          fi
+          
+          if [ -n "${{ secrets.WEBHOOK_SECRET }}" ]; then
+            echo "${{ secrets.WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET --env production
+          fi
+          
+          if [ -n "${{ secrets.MIGRATION_TOKEN }}" ]; then
+            echo "${{ secrets.MIGRATION_TOKEN }}" | wrangler secret put MIGRATION_TOKEN --env production
+          fi
+        continue-on-error: true
