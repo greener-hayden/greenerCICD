@@ -868,7 +868,6 @@ async function handleAdmin(params) {
         const switches = document.querySelectorAll('input[type="checkbox"]');
         switches.forEach(sw => {
           sw.addEventListener('change', (e) => {
-            console.log(e.target.id + ' changed to ' + e.target.checked);
             // In production, save these preferences to KV storage
           });
         });
