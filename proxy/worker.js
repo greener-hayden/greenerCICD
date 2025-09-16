@@ -1009,18 +1009,3 @@ function methodNotAllowed() {
 function serverError(message) {
   return new Response(`Server error: ${message}`, { status: 500 });
 }
-
-// Export functions for use in enhanced worker
-export {
-  handleWebhook,
-  handleHome,
-  handleConfigure,
-  handleCallback,
-  handleProvision,
-  handleAnalytics,
-  handleGetRepos,
-  handleStyles,
-  notFound,
-  methodNotAllowed,
-  serverError
-};
