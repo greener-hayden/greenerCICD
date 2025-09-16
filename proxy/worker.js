@@ -40,6 +40,8 @@ async function handleRequest(request, env, ctx) {
         return request.method === 'POST' 
           ? handleWebhook(request, validatedEnv) 
           : cachedGet(request, 300, () => handleHome(validatedEnv));
+      case '/health':
+        return handleHealth();
       case '/configure':
         return handleConfigure(url.searchParams, validatedEnv);
       case '/admin':
@@ -738,6 +740,22 @@ async function handleGetRepos(params, env) {
     headers: { 'Content-Type': 'application/json' }
   });
 }
+
+/**
+ * Handle health check endpoint
+ */
+function handleHealth() {
+  return new Response(JSON.stringify({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    worker: 'greener-cicd',
+    version: '1.0.0'
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
 
 /**
  * Get demo repositories for testing
