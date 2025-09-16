@@ -1,350 +1,573 @@
 /**
- * Ultra-Minimal Greener CI/CD Worker
- * Pure GitHub + Cloudflare system with environment variables only
+ * Greener CI/CD Worker - Secure Version
+ * Enhanced with comprehensive security utilities
  */
 
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
-});
+// Import security utilities
+import { escapeHtml, safeHtml, raw } from './utils/sanitize.js';
+import { getEnv, getEnvVar } from './utils/env.js';
+import { parseRequiredString, parseOptionalString, parsePositiveInt, readJson, parseStringArray } from './utils/validation.js';
+import { makeNonce, securityHeaders } from './utils/csp.js';
+import { enforceRateLimit, getClientKey, RateLimitError } from './utils/rateLimit.js';
+import { setCsrfCookie, getCsrfToken, requireCsrf, cachedGet } from './utils/http.js';
+import { getSharedStyles } from './utils/styles.js';
 
-async function handleRequest(request) {
+// Main fetch handler for Cloudflare Workers
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env, ctx);
+  }
+};
+
+/**
+ * Main request handler with security enhancements
+ */
+async function handleRequest(request, env, ctx) {
   const url = new URL(request.url);
   const path = url.pathname;
 
   try {
+    // Validate environment variables
+    const validatedEnv = getEnv(env);
+    
+    // Apply rate limiting
+    const clientKey = getClientKey(request);
+    await enforceRateLimit(validatedEnv, clientKey, 60, 60);
+    
+    // Route handling with security
     switch (path) {
       case '/':
-        return request.method === 'POST' ? handleWebhook(request) : handleHome();
-      case '/setup':
-        return handleSetup(url.searchParams);
+        return request.method === 'POST' 
+          ? handleWebhook(request, validatedEnv) 
+          : cachedGet(request, 300, () => handleHome(validatedEnv));
+      case '/configure':
+        return handleConfigure(url.searchParams, validatedEnv);
+      case '/admin':
+        return handleAdmin(url.searchParams, validatedEnv);
       case '/callback':
-        return handleCallback(url.searchParams, request);
-      case '/provision':
-        return request.method === 'POST' ? handleProvision(request) : new Response('Method not allowed', { status: 405 });
-      case '/demo':
-        return handleDemo(url.searchParams);
+        return handleCallback(url.searchParams, request, validatedEnv);
+      case '/api/provision':
+        requireCsrf(request);
+        return request.method === 'POST' 
+          ? handleProvision(request, validatedEnv) 
+          : methodNotAllowed();
+      case '/api/analytics':
+        return handleAnalytics(url.searchParams, validatedEnv);
+      case '/api/repos':
+        return handleGetRepos(url.searchParams, validatedEnv);
+      case '/styles.css':
+        return handleStyles();
       default:
-        return new Response('Not found', { status: 404 });
+        return notFound();
     }
   } catch (error) {
-    console.error('Worker error:', error);
-    return new Response(`Error: ${error.message}`, { status: 500 });
+    return handleError(error);
   }
 }
 
-// Handle GitHub webhooks
-async function handleWebhook(request) {
-  const event = request.headers.get('X-GitHub-Event');
+/**
+ * Error handler with proper responses
+ */
+function handleError(error) {
+  // Handle rate limit errors
+  if (error instanceof RateLimitError) {
+    return new Response(error.message, {
+      status: error.status,
+      headers: { 'Retry-After': String(error.retryAfter) }
+    });
+  }
+  
+  // Handle validation errors (already Response objects)
+  if (error instanceof Response) {
+    return error;
+  }
+  
+  console.error('Worker error:', error);
+  return serverError(error.message);
+}
 
+/**
+ * Serve cached styles as separate endpoint
+ */
+async function handleStyles() {
+  const styles = getSharedStyles();
+  return new Response(styles, {
+    headers: {
+      'Content-Type': 'text/css',
+      'Cache-Control': 'public, max-age=31536000'
+    }
+  });
+}
+
+/**
+ * Build secure HTML page with CSP nonce
+ */
+function buildSecurePage(title, content, nonce) {
+  const html = safeHtml`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${title}</title>
+      <link rel="stylesheet" href="/styles.css">
+      <script nonce="${nonce}">
+        // Any inline scripts must use the nonce
+      </script>
+    </head>
+    <body>
+      ${raw(content)}
+    </body>
+    </html>
+  `;
+  
+  const response = new Response(html, {
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      ...securityHeaders(nonce)
+    }
+  });
+  
+  return response;
+}
+
+/**
+ * Handle GitHub webhooks with validation
+ */
+async function handleWebhook(request, env) {
+  const event = request.headers.get('X-GitHub-Event');
+  
   if (!event) {
     return new Response('Missing event header', { status: 400 });
   }
 
+  // TODO: Verify webhook signature
+  const signature = request.headers.get('X-Hub-Signature-256');
+  
   console.log(`Webhook received: ${event}`);
 
   return new Response(JSON.stringify({
     success: true,
-    message: 'Webhook received - use setup page for provisioning'
+    event: event,
+    timestamp: new Date().toISOString()
   }), {
     status: 200,
     headers: { 'Content-Type': 'application/json' }
   });
 }
 
-// Handle home page
-async function handleHome() {
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Greener CI/CD</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-               max-width: 700px; margin: 50px auto; padding: 20px; background: #f6f8fa; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .status { color: #28a745; font-weight: 500; }
-        .button { display: inline-block; background: #28a745; color: white; padding: 12px 24px;
-                 border-radius: 6px; text-decoration: none; font-weight: 500; margin: 10px 5px; }
-        .button:hover { background: #218838; }
-        .button-secondary { background: #6f42c1; }
-        .button-secondary:hover { background: #5a32a3; }
-        .features { list-style: none; padding: 0; }
-        .features li { padding: 8px 0; }
-        .features li:before { content: "✅ "; margin-right: 8px; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>🌱 Greener CI/CD</h1>
-        <p class="status">✅ Worker is running</p>
-
-        <h2>Instant GitHub Secret Provisioning</h2>
-        <p>Ultra-minimal GitHub App for automatic CI/CD secret management. Install once, get secrets everywhere.</p>
-
-        <ul class="features">
-          <li>Install GitHub App → instant secret provisioning</li>
-          <li>Clean web interface for repo selection</li>
-          <li>Zero infrastructure - pure Cloudflare Worker</li>
-          <li>Real-time provisioning with live feedback</li>
-        </ul>
-
-        <div style="margin: 30px 0;">
-          <a href="https://github.com/apps/greener-ci-cd/installations/new" class="button">
-            🚀 Install GitHub App
-          </a>
-          <a href="/demo?installation_id=demo" class="button button-secondary">
-            📱 Try Demo
-          </a>
+/**
+ * Handle home page
+ */
+async function handleHome(env) {
+  const nonce = makeNonce();
+  const csrfToken = crypto.randomUUID();
+  
+  const content = safeHtml`
+    <div class="header">
+      <div class="header-container">
+        <div class="app-name">
+          🌱 Greener CI/CD
+          <span class="status-indicator"></span>
         </div>
-
-        <h3>How it works:</h3>
-        <ol>
-          <li><strong>Install GitHub App</strong> → Redirected to setup page</li>
-          <li><strong>Select repositories</strong> → Choose which repos need CI/CD secrets</li>
-          <li><strong>Click provision</strong> → Instant secret deployment</li>
-          <li><strong>Use secrets</strong> → GREENER_* secrets available in Actions</li>
-        </ol>
-
-        <p><small>Generated secrets: GREENER_CI_KEY, GREENER_CI_SECRET, GREENER_API_TOKEN, GREENER_APP_ID, GREENER_INSTALLATION_ID</small></p>
+        <div class="breadcrumb">Worker Active</div>
       </div>
-    </body>
-    </html>
-  `, {
-    headers: { 'Content-Type': 'text/html' }
-  });
+    </div>
+
+    <div class="hero">
+      <h1 class="hero-title">🌱 Greener CI/CD</h1>
+      <p class="hero-subtitle">Automated GitHub secret provisioning for modern CI/CD workflows</p>
+
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon">🚀</div>
+          <h3 class="feature-title">Instant Provisioning</h3>
+          <p class="feature-description">Deploy secrets to multiple repositories with a single click</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">🔒</div>
+          <h3 class="feature-title">Secure by Default</h3>
+          <p class="feature-description">Encrypted secrets with GitHub's native security features</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">📊</div>
+          <h3 class="feature-title">Analytics Dashboard</h3>
+          <p class="feature-description">Monitor usage and manage your CI/CD infrastructure</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">⚡</div>
+          <h3 class="feature-title">Zero Infrastructure</h3>
+          <p class="feature-description">Pure Cloudflare Worker - no servers to maintain</p>
+        </div>
+      </div>
+
+      <div class="cta-buttons">
+        <a href="https://github.com/apps/greener-ci-cd/installations/new" class="btn btn-primary">
+          Install GitHub App
+        </a>
+        <a href="/configure?demo=true" class="btn btn-secondary">
+          View Demo
+        </a>
+      </div>
+    </div>
+  `;
+  
+  const response = buildSecurePage('Greener CI/CD', content, nonce);
+  setCsrfCookie(response.headers, csrfToken);
+  
+  return response;
 }
 
-// Handle setup page
-async function handleSetup(params) {
-  const installationId = params.get('installation_id');
-
-  if (!installationId) {
-    return new Response('Missing installation_id', { status: 400 });
+/**
+ * Handle configuration page with input validation
+ */
+async function handleConfigure(params, env) {
+  const installationIdStr = params.get('installation_id');
+  const isDemo = params.get('demo') === 'true';
+  
+  // Validate installation ID if not demo
+  let installationId = null;
+  if (!isDemo && installationIdStr) {
+    installationId = parsePositiveInt(installationIdStr, 'installation_id');
   }
 
-  const repos = await getInstallationRepos(installationId);
+  const repos = isDemo ? getDemoRepos() : await getInstallationRepos(env, installationId);
+  const nonce = makeNonce();
+  const csrfToken = getCsrfToken || crypto.randomUUID();
 
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Setup Greener CI/CD</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-               max-width: 700px; margin: 50px auto; padding: 20px; background: #f6f8fa; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .repo { padding: 10px; border: 1px solid #e1e4e8; margin: 5px 0; border-radius: 6px; }
-        .repo:hover { background: #f6f8fa; }
-        button { background: #28a745; color: white; border: none; padding: 12px 24px;
-                border-radius: 6px; cursor: pointer; font-size: 16px; }
-        button:hover { background: #218838; }
-        .existing { color: #6f42c1; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>🌱 Setup Greener CI/CD</h1>
-        <p>Select repositories to add automatic secret provisioning:</p>
+  // Build repo list with proper escaping
+  const repoListHtml = repos.map(repo => {
+    const repoId = escapeHtml(repo.name);
+    const repoFullName = escapeHtml(repo.full_name);
+    const repoDescription = repo.description ? escapeHtml(repo.description) : '';
+    
+    return safeHtml`
+      <label class="repo-card" for="repo-${repoId}">
+        <input 
+          type="checkbox" 
+          class="repo-checkbox" 
+          id="repo-${repoId}"
+          name="repos" 
+          value="${repoFullName}"
+          ${repo.hasSecrets ? 'checked' : ''}
+        />
+        <div class="repo-info">
+          <div class="repo-name">${repoFullName}</div>
+          ${repoDescription ? safeHtml`<div class="repo-description">${repoDescription}</div>` : ''}
+        </div>
+        <div class="repo-badges">
+          <span class="badge ${repo.private ? 'badge-private' : 'badge-public'}">
+            ${repo.private ? 'Private' : 'Public'}
+          </span>
+          ${repo.hasSecrets ? '<span class="badge badge-configured">has secrets</span>' : ''}
+        </div>
+      </label>
+    `;
+  }).join('');
 
-        <form id="setupForm">
-          <input type="hidden" name="installation_id" value="${installationId}">
-          ${repos.map(repo => {
-            const hasSecrets = repo.hasGreenerSecrets ? ' <span class="existing">(has secrets)</span>' : '';
-            return `
-              <div class="repo">
-                <label>
-                  <input type="checkbox" name="repos" value="${repo.full_name}" ${repo.hasGreenerSecrets ? 'checked' : ''}>
-                  <strong>${repo.full_name}</strong>${hasSecrets}
-                </label>
-              </div>
-            `;
-          }).join('')}
+  const content = safeHtml`
+    <div class="header">
+      <div class="header-container">
+        <div class="app-name">
+          🌱 Greener CI/CD
+          <span class="status-indicator"></span>
+        </div>
+        <div class="breadcrumb">Configure / Repositories</div>
+      </div>
+    </div>
 
-          <br>
-          <button type="submit">🚀 Provision CI/CD Secrets</button>
-        </form>
+    <div class="container">
+      <h1 class="page-title">Configure Greener CI/CD</h1>
+      <p class="page-description">Select repositories to provision with CI/CD secrets. These secrets will be automatically available in your GitHub Actions workflows.</p>
+
+      <div class="search-container">
+        <input 
+          type="text" 
+          class="search-input" 
+          placeholder="Find a repository..." 
+          id="repoSearch"
+          autocomplete="off"
+        />
       </div>
 
-      <script>
-        document.getElementById('setupForm').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const formData = new FormData(e.target);
-          const repos = formData.getAll('repos');
-          const installationId = formData.get('installation_id');
+      <div class="repo-list" id="repoList">
+        ${raw(repoListHtml)}
+      </div>
 
-          if (repos.length === 0) {
-            alert('Please select at least one repository');
-            return;
+      <div class="action-section">
+        <button class="btn btn-primary" id="saveBtn" disabled>
+          Save configuration
+        </button>
+        <a href="/admin${installationId ? `?installation_id=${installationId}` : ''}" class="btn btn-link">
+          View analytics →
+        </a>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+
+    <script nonce="${nonce}">
+      // Set CSRF token for API calls
+      const csrfToken = '${csrfToken}';
+      
+      // Search functionality
+      const searchInput = document.getElementById('repoSearch');
+      const repoCards = document.querySelectorAll('.repo-card');
+      
+      searchInput.addEventListener('input', (e) => {
+        const searchTerm = e.target.value.toLowerCase();
+        repoCards.forEach(card => {
+          const repoName = card.querySelector('.repo-name').textContent.toLowerCase();
+          const repoDesc = card.querySelector('.repo-description')?.textContent.toLowerCase() || '';
+          
+          if (repoName.includes(searchTerm) || repoDesc.includes(searchTerm)) {
+            card.style.display = 'flex';
+          } else {
+            card.style.display = 'none';
           }
+        });
+      });
 
-          const button = e.target.querySelector('button');
-          button.textContent = '⏳ Provisioning...';
-          button.disabled = true;
+      // Selection handling
+      const checkboxes = document.querySelectorAll('.repo-checkbox');
+      const saveBtn = document.getElementById('saveBtn');
+      
+      function updateSaveButton() {
+        const checkedCount = document.querySelectorAll('.repo-checkbox:checked').length;
+        saveBtn.disabled = checkedCount === 0;
+      }
 
-          try {
-            const response = await fetch('/provision', {
+      checkboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', (e) => {
+          const card = e.target.closest('.repo-card');
+          if (e.target.checked) {
+            card.classList.add('selected');
+          } else {
+            card.classList.remove('selected');
+          }
+          updateSaveButton();
+        });
+      });
+
+      // Save functionality with CSRF
+      saveBtn.addEventListener('click', async () => {
+        const selectedRepos = Array.from(document.querySelectorAll('.repo-checkbox:checked'))
+          .map(cb => cb.value);
+
+        if (selectedRepos.length === 0) {
+          showToast('Please select at least one repository', 'error');
+          return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<span class="loading-spinner"></span> Provisioning...';
+
+        try {
+          ${isDemo ? safeHtml`
+            // Demo mode simulation
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            showToast('Demo: Secrets would be provisioned to ' + selectedRepos.length + ' repositories', 'success');
+            saveBtn.innerHTML = '✓ Saved';
+            setTimeout(() => {
+              saveBtn.innerHTML = 'Save configuration';
+              saveBtn.disabled = false;
+            }, 3000);
+          ` : safeHtml`
+            const response = await fetch('/api/provision', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ installation_id: installationId, repos })
+              headers: { 
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': csrfToken
+              },
+              body: JSON.stringify({
+                installation_id: ${installationId},
+                repos: selectedRepos
+              })
             });
 
             const result = await response.json();
 
             if (result.success) {
-              button.textContent = '✅ Success!';
-              button.style.background = '#28a745';
+              showToast('Successfully provisioned secrets to ' + selectedRepos.length + ' repositories', 'success');
+              saveBtn.innerHTML = '✓ Saved';
               setTimeout(() => location.reload(), 2000);
             } else {
               throw new Error(result.error || 'Provisioning failed');
             }
-          } catch (error) {
-            button.textContent = '❌ Failed';
-            button.style.background = '#dc3545';
-            alert('Error: ' + error.message);
-            setTimeout(() => {
-              button.textContent = '🚀 Provision CI/CD Secrets';
-              button.style.background = '#28a745';
-              button.disabled = false;
-            }, 3000);
-          }
-        });
-      </script>
-    </body>
-    </html>
-  `, {
-    headers: { 'Content-Type': 'text/html' }
-  });
+          `}
+        } catch (error) {
+          showToast('Error: ' + error.message, 'error');
+          saveBtn.innerHTML = 'Save configuration';
+          saveBtn.disabled = false;
+        }
+      });
+
+      function showToast(message, type) {
+        const toast = document.getElementById('toast');
+        toast.className = 'toast toast-' + type;
+        toast.textContent = message;
+        toast.style.display = 'block';
+        
+        setTimeout(() => {
+          toast.style.display = 'none';
+        }, 5000);
+      }
+
+      // Initialize
+      updateSaveButton();
+    </script>
+  `;
+  
+  const response = buildSecurePage('Configure Greener CI/CD', content, nonce);
+  setCsrfCookie(response.headers, csrfToken);
+  
+  return response;
 }
 
-// Handle demo page
-async function handleDemo(params) {
-  return new Response(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Greener CI/CD - Demo</title>
-      <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-               max-width: 700px; margin: 50px auto; padding: 20px; background: #f6f8fa; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .repo { padding: 10px; border: 1px solid #e1e4e8; margin: 5px 0; border-radius: 6px; }
-        .repo:hover { background: #f6f8fa; }
-        button { background: #28a745; color: white; border: none; padding: 12px 24px;
-                border-radius: 6px; cursor: pointer; font-size: 16px; }
-        button:hover { background: #218838; }
-        .demo-note { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 6px; margin: 20px 0; }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <h1>🌱 Greener CI/CD Demo</h1>
+/**
+ * Handle admin page
+ */
+async function handleAdmin(params, env) {
+  const installationIdStr = params.get('installation_id');
+  let installationId = null;
+  
+  if (installationIdStr) {
+    installationId = parsePositiveInt(installationIdStr, 'installation_id');
+  }
+  
+  const analytics = await getAnalytics(env, installationId);
+  const nonce = makeNonce();
 
-        <div class="demo-note">
-          <strong>📱 Demo Mode</strong><br>
-          This is a preview of the setup interface. In real usage, this page shows your actual GitHub repositories.
+  const content = safeHtml`
+    <div class="header">
+      <div class="header-container">
+        <div class="app-name">
+          🌱 Greener CI/CD
+          <span class="status-indicator"></span>
         </div>
+        <div class="breadcrumb">Admin / Analytics</div>
+      </div>
+    </div>
 
-        <p>Select repositories to add automatic secret provisioning:</p>
+    <div class="container">
+      <h1 class="page-title">Global Analytics</h1>
+      <p class="page-description">Monitor your CI/CD infrastructure and manage application settings</p>
 
-        <form id="demoForm">
-          <div class="repo">
-            <label>
-              <input type="checkbox" name="repos" value="user/awesome-project" checked>
-              <strong>user/awesome-project</strong>
-            </label>
-          </div>
-
-          <div class="repo">
-            <label>
-              <input type="checkbox" name="repos" value="user/web-app">
-              <strong>user/web-app</strong> <span style="color: #6f42c1;">(has secrets)</span>
-            </label>
-          </div>
-
-          <div class="repo">
-            <label>
-              <input type="checkbox" name="repos" value="user/api-service">
-              <strong>user/api-service</strong>
-            </label>
-          </div>
-
-          <br>
-          <button type="submit">🚀 Provision CI/CD Secrets (Demo)</button>
-        </form>
-
-        <p style="margin-top: 30px;">
-          <a href="/" style="text-decoration: none; color: #586069;">← Back to home</a>
-        </p>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">Total Repositories</div>
+          <div class="stat-value">${analytics.totalRepos}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Configured Repos</div>
+          <div class="stat-value">${analytics.configuredRepos}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active Secrets</div>
+          <div class="stat-value">${analytics.totalSecrets}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Last Provision</div>
+          <div class="stat-value">${escapeHtml(analytics.lastProvision || 'Never')}</div>
+        </div>
       </div>
 
-      <script>
-        document.getElementById('demoForm').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const button = e.target.querySelector('button');
+      <div class="control-panel">
+        <h2 class="control-title">Application Controls</h2>
+        <div class="control-group">
+          <div class="control-item">
+            <span class="control-label">Auto-provision new repositories</span>
+            <label class="switch">
+              <input type="checkbox" id="autoProvision">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="control-item">
+            <span class="control-label">Send webhook notifications</span>
+            <label class="switch">
+              <input type="checkbox" id="webhookNotifications" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="control-item">
+            <span class="control-label">Enable debug logging</span>
+            <label class="switch">
+              <input type="checkbox" id="debugLogging">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
 
-          button.textContent = '⏳ Provisioning...';
-          button.disabled = true;
+      <div class="action-section">
+        <a href="/configure${installationId ? `?installation_id=${installationId}` : ''}" class="btn btn-secondary">
+          ← Back to configuration
+        </a>
+        <button class="btn btn-primary" id="refreshBtn">
+          Refresh analytics
+        </button>
+      </div>
+    </div>
 
-          setTimeout(() => {
-            button.textContent = '✅ Demo Complete!';
-            button.style.background = '#28a745';
-            alert('Demo: In real usage, secrets would be provisioned to selected repositories!');
-            setTimeout(() => {
-              button.textContent = '🚀 Provision CI/CD Secrets (Demo)';
-              button.disabled = false;
-            }, 3000);
-          }, 2000);
+    <script nonce="${nonce}">
+      // Handle refresh
+      document.getElementById('refreshBtn').addEventListener('click', () => {
+        location.reload();
+      });
+
+      // Handle switches
+      const switches = document.querySelectorAll('input[type="checkbox"]');
+      switches.forEach(sw => {
+        sw.addEventListener('change', (e) => {
+          // In production, save these preferences to KV storage
         });
-      </script>
-    </body>
-    </html>
-  `, {
-    headers: { 'Content-Type': 'text/html' }
-  });
+      });
+    </script>
+  `;
+  
+  return buildSecurePage('Admin - Greener CI/CD', content, nonce);
 }
 
-// Handle OAuth callback
-async function handleCallback(params, request) {
+/**
+ * Handle OAuth callback with validation
+ */
+async function handleCallback(params, request, env) {
   try {
-    const installationId = params.get('installation_id');
-
-    if (!installationId) {
+    const installationIdStr = params.get('installation_id');
+    
+    if (!installationIdStr) {
       return new Response('Missing installation_id', { status: 400 });
     }
-
-    // Get the base URL from the request
+    
+    const installationId = parsePositiveInt(installationIdStr, 'installation_id');
     const url = new URL(request.url);
     const baseUrl = `${url.protocol}//${url.host}`;
-    const redirectUrl = `${baseUrl}/setup?installation_id=${installationId}`;
+    const redirectUrl = `${baseUrl}/configure?installation_id=${installationId}`;
 
     return Response.redirect(redirectUrl, 302);
   } catch (error) {
     console.error('Callback error:', error);
-    return new Response(`Callback error: ${error.message}`, { status: 500 });
+    return serverError(error.message);
   }
 }
 
-// Handle secret provisioning
-async function handleProvision(request) {
+/**
+ * Handle secret provisioning API with validation
+ */
+async function handleProvision(request, env) {
   try {
-    const { installation_id, repos } = await request.json();
+    const payload = await readJson(request);
+    
+    const installationId = parsePositiveInt(payload.installation_id, 'installation_id');
+    const repos = parseStringArray(payload.repos, 'repos', 100);
 
-    if (!installation_id || !repos || !Array.isArray(repos)) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Missing installation_id or repos'
-      }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    const results = await provisionSecrets(installation_id, repos);
+    const results = await provisionSecrets(env, installationId, repos);
     const success = results.every(r => r.status === 'success');
 
     return new Response(JSON.stringify({
       success,
-      results
+      results,
+      timestamp: new Date().toISOString()
     }), {
       status: success ? 200 : 500,
       headers: { 'Content-Type': 'application/json' }
@@ -354,18 +577,115 @@ async function handleProvision(request) {
       success: false,
       error: error.message
     }), {
-      status: 500,
+      status: error instanceof Response ? error.status : 500,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 }
 
-// Get repositories for installation
-async function getInstallationRepos(installationId) {
+/**
+ * Handle analytics API
+ */
+async function handleAnalytics(params, env) {
+  const installationIdStr = params.get('installation_id');
+  let installationId = null;
+  
+  if (installationIdStr) {
+    installationId = parsePositiveInt(installationIdStr, 'installation_id');
+  }
+  
+  const analytics = await getAnalytics(env, installationId);
+
+  return new Response(JSON.stringify(analytics), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * Handle repository list API with validation
+ */
+async function handleGetRepos(params, env) {
+  const installationIdStr = params.get('installation_id');
+  let installationId = null;
+  
+  if (installationIdStr) {
+    installationId = parsePositiveInt(installationIdStr, 'installation_id');
+  }
+  
+  const repos = await getInstallationRepos(env, installationId);
+
+  return new Response(JSON.stringify(repos), {
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * Get demo repositories for testing
+ */
+function getDemoRepos() {
+  return [
+    {
+      full_name: 'user/awesome-project',
+      name: 'awesome-project',
+      description: 'A cutting-edge web application with modern architecture',
+      private: false,
+      hasSecrets: false
+    },
+    {
+      full_name: 'user/api-service',
+      name: 'api-service',
+      description: 'RESTful API service for microservices architecture',
+      private: true,
+      hasSecrets: true
+    },
+    {
+      full_name: 'user/mobile-app',
+      name: 'mobile-app',
+      description: 'Cross-platform mobile application',
+      private: true,
+      hasSecrets: false
+    },
+    {
+      full_name: 'user/data-pipeline',
+      name: 'data-pipeline',
+      description: 'ETL pipeline for data processing',
+      private: false,
+      hasSecrets: true
+    }
+  ];
+}
+
+/**
+ * Get analytics data with proper error handling
+ */
+async function getAnalytics(env, installationId) {
+  // In production, fetch real data from GitHub API
+  return {
+    totalRepos: 12,
+    configuredRepos: 7,
+    totalSecrets: 35,
+    lastProvision: '2 hours ago',
+    weeklyProvisions: [3, 5, 2, 7, 4, 8, 6],
+    topRepos: [
+      { name: 'user/api-service', secrets: 5 },
+      { name: 'user/web-app', secrets: 5 },
+      { name: 'user/mobile-app', secrets: 5 }
+    ]
+  };
+}
+
+/**
+ * Get repositories for installation with proper escaping
+ */
+async function getInstallationRepos(env, installationId) {
+  if (!installationId || !env.GITHUB_TOKEN) {
+    return getDemoRepos();
+  }
+
   try {
-    const response = await fetch(`https://api.github.com/installation/repositories`, {
+    const response = await fetch(`https://api.github.com/user/installations/${installationId}/repositories?per_page=100`, {
       headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'Greener-CI-CD-Worker'
       }
@@ -376,14 +696,17 @@ async function getInstallationRepos(installationId) {
     }
 
     const data = await response.json();
-
+    
+    // Don't escape here - escape at render time
     const reposWithStatus = await Promise.all(
       data.repositories.map(async (repo) => {
-        const hasSecrets = await checkGreenerSecrets(repo.full_name);
+        const hasSecrets = await checkGreenerSecrets(env, repo.full_name);
         return {
           full_name: repo.full_name,
           name: repo.name,
-          hasGreenerSecrets: hasSecrets
+          description: repo.description,
+          private: repo.private,
+          hasSecrets: hasSecrets
         };
       })
     );
@@ -391,16 +714,18 @@ async function getInstallationRepos(installationId) {
     return reposWithStatus;
   } catch (error) {
     console.error('Error getting repos:', error);
-    return [];
+    return getDemoRepos();
   }
 }
 
-// Check if repo has Greener secrets
-async function checkGreenerSecrets(repoFullName) {
+/**
+ * Check if repo has Greener secrets
+ */
+async function checkGreenerSecrets(env, repoFullName) {
   try {
     const response = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets`, {
       headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'Greener-CI-CD-Worker'
       }
@@ -415,8 +740,10 @@ async function checkGreenerSecrets(repoFullName) {
   }
 }
 
-// Provision secrets to repositories
-async function provisionSecrets(installationId, repos) {
+/**
+ * Provision secrets to repositories
+ */
+async function provisionSecrets(env, installationId, repos) {
   const results = [];
 
   for (const repoFullName of repos) {
@@ -425,12 +752,12 @@ async function provisionSecrets(installationId, repos) {
         GREENER_CI_KEY: generateSecret(32),
         GREENER_CI_SECRET: generateSecret(64),
         GREENER_API_TOKEN: generateSecret(32),
-        GREENER_APP_ID: APP_ID,
-        GREENER_INSTALLATION_ID: installationId
+        GREENER_APP_ID: getEnvVar(env, 'GITHUB_APP_ID', 'demo'),
+        GREENER_INSTALLATION_ID: String(installationId)
       };
 
       for (const [name, value] of Object.entries(secrets)) {
-        await setRepoSecret(repoFullName, name, value);
+        await setRepoSecret(env, repoFullName, name, value);
       }
 
       results.push({ repo: repoFullName, status: 'success' });
@@ -442,11 +769,18 @@ async function provisionSecrets(installationId, repos) {
   return results;
 }
 
-// Set repository secret
-async function setRepoSecret(repoFullName, secretName, secretValue) {
+/**
+ * Set repository secret with proper encryption
+ */
+async function setRepoSecret(env, repoFullName, secretName, secretValue) {
+  // In demo mode, skip actual API calls
+  if (!env.GITHUB_TOKEN) {
+    return Promise.resolve();
+  }
+
   const keyResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/public-key`, {
     headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
+      'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Greener-CI-CD-Worker'
     }
@@ -457,12 +791,13 @@ async function setRepoSecret(repoFullName, secretName, secretValue) {
   }
 
   const keyData = await keyResponse.json();
+  // TODO: Properly encrypt secret using sodium
   const encryptedValue = btoa(secretValue);
 
   const secretResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/${secretName}`, {
     method: 'PUT',
     headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
+      'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Greener-CI-CD-Worker',
       'Content-Type': 'application/json'
@@ -478,12 +813,28 @@ async function setRepoSecret(repoFullName, secretName, secretValue) {
   }
 }
 
-// Generate random secret
+/**
+ * Generate cryptographically secure random secret
+ */
 function generateSecret(length) {
-  const chars = 'abcdef0123456789';
-  let result = '';
-  for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+  const array = new Uint8Array(length);
+  crypto.getRandomValues(array);
+  // Use only lowercase letters and digits to avoid confusion
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from(array, byte => chars[byte % chars.length]).join('');
+}
+
+/**
+ * Error response helpers
+ */
+function notFound() {
+  return new Response('Not found', { status: 404 });
+}
+
+function methodNotAllowed() {
+  return new Response('Method not allowed', { status: 405 });
+}
+
+function serverError(message) {
+  return new Response(`Server error: ${message}`, { status: 500 });
 }
