@@ -8,8 +8,8 @@
 // Configuration - set these as Cloudflare Worker environment variables
 const CONFIG = {
     GITHUB_OWNER: 'greener-hayden',
-    GITHUB_REPO: 'dotfiles',
-    WORKFLOW_FILE: 'webhook-handler.yml',
+    GITHUB_REPO: 'greenerCICD',
+    WORKFLOW_FILE: 'webhook-receiver.yml',
     GITHUB_TOKEN: null,  // Set as secret in Cloudflare Worker
     ALLOWED_EVENTS: [
         'installation',
@@ -66,9 +66,9 @@ async function handleRequest(request) {
         // Encode payload for safe transmission
         const encodedPayload = btoa(payload);
 
-        // Trigger GitHub Actions workflow
+        // Trigger GitHub Actions workflow via repository_dispatch
         const githubResponse = await fetch(
-            `https://api.github.com/repos/${CONFIG.GITHUB_OWNER}/${CONFIG.GITHUB_REPO}/actions/workflows/${CONFIG.WORKFLOW_FILE}/dispatches`,
+            `https://api.github.com/repos/${CONFIG.GITHUB_OWNER}/${CONFIG.GITHUB_REPO}/dispatches`,
             {
                 method: 'POST',
                 headers: {
@@ -78,8 +78,8 @@ async function handleRequest(request) {
                     'User-Agent': 'Greener-CI-CD-Webhook-Proxy'
                 },
                 body: JSON.stringify({
-                    ref: 'main',
-                    inputs: {
+                    event_type: 'app_webhook',
+                    client_payload: {
                         event: event,
                         payload: encodedPayload,
                         signature: signature || ''

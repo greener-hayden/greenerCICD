@@ -1,0 +1,61 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    paths:
+      - 'proxy/**'
+      - 'wrangler.toml'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    if: github.repository == 'greener-hayden/greenerCICD'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install -g wrangler
+
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          # Set secrets in Cloudflare Worker
+          echo "Setting worker secrets..."
+          echo "${{ secrets.GITHUB_TOKEN }}" | wrangler secret put GITHUB_TOKEN --env production
+
+          # Set webhook secret if provided
+          if [ -n "${{ secrets.GITHUB_WEBHOOK_SECRET }}" ]; then
+            echo "${{ secrets.GITHUB_WEBHOOK_SECRET }}" | wrangler secret put WEBHOOK_SECRET --env production
+          fi
+
+          # Deploy worker
+          echo "Deploying worker..."
+          wrangler deploy --env production
+
+      - name: Get worker URL
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          WORKER_URL=$(wrangler whoami 2>/dev/null | grep -o 'https://[^[:space:]]*' || echo "Check Cloudflare dashboard for URL")
+          echo "### ✅ Worker Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "**Webhook URL**: Set this in your GitHub App webhook settings" >> $GITHUB_STEP_SUMMARY
+          echo "**Worker Name**: greener-cicd-webhook-proxy" >> $GITHUB_STEP_SUMMARY

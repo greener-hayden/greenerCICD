@@ -22,6 +22,18 @@ installations.json
 *.log
 logs/
 
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Screenshots and images
+*.png
+*.jpg
+*.jpeg
+*.gif
+
 # OS
 .DS_Store
 Thumbs.db
@@ -33,3 +45,9 @@ Thumbs.db
 # Build
 dist/
 build/
+
+# Wrangler
+.wrangler/
+
+# Act (local testing)
+.act-cache/

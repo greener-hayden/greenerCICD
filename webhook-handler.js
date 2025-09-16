@@ -10,16 +10,20 @@ const { App } = require('@octokit/app');
 const { Octokit } = require('@octokit/rest');
 const sodium = require('libsodium-wrappers');
 
-// Load configuration
-const config = require('./config.json');
+// Configuration from environment variables
+const config = {
+  appId: process.env.GITHUB_APP_ID,
+  privateKey: process.env.GITHUB_APP_PRIVATE_KEY,
+  webhookSecret: process.env.GITHUB_WEBHOOK_SECRET
+};
 
 class GreenerCICDApp {
   constructor() {
     this.app = new App({
-      appId: process.env.GITHUB_APP_ID || config.appId,
-      privateKey: process.env.GITHUB_APP_PRIVATE_KEY || config.privateKey,
+      appId: config.appId,
+      privateKey: config.privateKey,
       webhooks: {
-        secret: process.env.GITHUB_WEBHOOK_SECRET || config.webhookSecret
+        secret: config.webhookSecret
       }
     });
   }
