@@ -25,6 +25,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check secrets and variables
+        run: |
+          echo "Checking availability..."
+          echo "GITHUB_TOKEN: $([ -n '${{ github.token }}' ] && echo 'present' || echo 'missing')"
+          echo "WEBHOOK_SECRET: $([ -n '${{ secrets.WEBHOOK_SECRET }}' ] && echo 'present' || echo 'missing')"
+          echo "APP_ID: $([ -n '${{ vars.APP_ID }}' ] && echo 'present' || echo 'missing')"
+
       - name: Deploy with Wrangler
         uses: cloudflare/wrangler-action@v3.14.1
         with:
@@ -32,12 +39,12 @@ jobs:
           environment: production
           secrets: |
             GITHUB_TOKEN
-            WEBHOOK_SECRET
-            APP_ID
+            ${{ secrets.WEBHOOK_SECRET && 'WEBHOOK_SECRET' || '' }}
+            ${{ vars.APP_ID && 'APP_ID' || '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          APP_ID: ${{ secrets.APP_ID }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET || 'not-set' }}
+          APP_ID: ${{ vars.APP_ID || 'not-set' }}
 
       - name: Deployment summary
         run: |
