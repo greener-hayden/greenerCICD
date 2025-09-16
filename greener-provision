@@ -9,62 +9,237 @@ set -euo pipefail
 WORKER_URL="https://greener-cicd-webhook-proxy.workers.dev"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+# CLI metadata
+VERSION="0.4.0"
+CLI_NAME="greener-provision"
+HOMEPAGE="https://github.com/greener-hayden/greenerCICD"
 
-# Logging functions
+# Exit codes
+EXIT_OK=0
+EXIT_UNKNOWN=1
+EXIT_BAD_ARGS=2
+EXIT_PREREQ=3
+EXIT_AUTH=4
+EXIT_PERM=5
+EXIT_NOT_FOUND=6
+EXIT_RATE_LIMIT=7
+EXIT_NETWORK=8
+EXIT_PARTIAL=10
+
+# Colors and formatting (respect NO_COLOR and non-TTY)
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  NC='\033[0m' # No Color
+else
+  RED=""; GREEN=""; YELLOW=""; BLUE=""; BOLD=""; DIM=""; NC=""
+fi
+
+# Logging levels: 0=silent 1=error 2=warn 3=info 4=debug
+LOG_LEVEL=${GREENER_LOG_LEVEL:-3}
+
+log_debug() {
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  [[ ${LOG_LEVEL} -ge 4 ]] && echo -e "${DIM}… $1${NC}"
+}
+
 log_info() {
-    echo -e "${BLUE}ℹ${NC} $1"
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "${BLUE}ℹ${NC} $1"
 }
 
 log_success() {
-    echo -e "${GREEN}✓${NC} $1"
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "${GREEN}✓${NC} $1"
 }
 
 log_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  [[ ${LOG_LEVEL} -ge 2 ]] && echo -e "${YELLOW}⚠${NC} $1"
 }
 
 log_error() {
-    echo -e "${RED}✗${NC} $1" >&2
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  # errors always print unless LOG_LEVEL=0
+  [[ ${LOG_LEVEL} -ge 1 ]] && echo -e "${RED}✗${NC} $1" >&2
 }
 
 log_header() {
-    echo -e "\n${BOLD}$1${NC}"
+  [[ "$OUTPUT_MODE" == "json" ]] && return
+  [[ ${LOG_LEVEL} -ge 3 ]] && echo -e "\n${BOLD}$1${NC}"
 }
+
+# Spinner utilities
+SPINNER_PID=""
+spin_start() {
+  local msg="$1"
+  [[ ${LOG_LEVEL} -lt 3 ]] && return 0
+  [[ "$OUTPUT_MODE" == "json" ]] && return 0
+  [[ ! -t 1 ]] && return 0
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  local i=0
+  {
+    while true; do
+      printf "\r${BLUE}%s${NC} %s" "${frames[i]}" "${msg}"
+      i=$(( (i+1) % ${#frames[@]} ))
+      sleep 0.1
+    done
+  } &
+  SPINNER_PID=$!
+}
+
+spin_stop() {
+  local status="$1" # 0=success else error
+  local msg="$2"
+  [[ -n "${SPINNER_PID}" ]] && kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+  SPINNER_PID=""
+  if [[ ${LOG_LEVEL} -ge 3 ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      printf "\r${GREEN}✓${NC} %s\n" "$msg"
+    else
+      printf "\r${RED}✗${NC} %s\n" "$msg"
+    fi
+  fi
+}
+
+# Prompt utilities
+prompt_yes_no() {
+  local prompt="$1"; local default="$2" # y or n
+  local choice
+  while true; do
+    if [[ "$default" == "y" ]]; then
+      read -r -p "$prompt [Y/n]: " choice || return 1
+      choice=${choice:-y}
+    else
+      read -r -p "$prompt [y/N]: " choice || return 1
+      choice=${choice:-n}
+    fi
+    case "${choice}" in
+      y|Y) return 0;;
+      n|N) return 1;;
+      *) log_warning "Please answer 'y' or 'n'." ;;
+    esac
+  done
+}
+
+# Validation
+validate_repo() {
+  local repo="$1"
+  [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
+}
+
+# Config handling
+CONFIG_PATH=""
+resolve_config_path() {
+  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  for p in "${CONFIG_PATH}" "$xdg/greener/cli.conf" "$HOME/.greener/cli.conf"; do
+    [[ -n "$p" && -f "$p" ]] && echo "$p" && return 0
+  done
+  return 1
+}
+
+apply_config_file() {
+  local cfg
+  if cfg=$(resolve_config_path); then
+    log_debug "Loading config: $cfg"
+    # shellcheck disable=SC1090
+    while IFS='=' read -r key value; do
+      [[ -z "$key" || "$key" =~ ^# ]] && continue
+      key=$(echo "$key" | tr '[:upper:]' '[:lower:]')
+      value="${value%\r}"
+      case "$key" in
+        worker_url) WORKER_URL="$value";;
+        log_level) LOG_LEVEL="$value";;
+        color)
+          if [[ "$value" == "never" ]]; then NO_COLOR=1; fi
+          ;;
+        interactive)
+          if [[ "$value" == "false" ]]; then DEFAULT_INTERACTIVE=false; fi
+          ;;
+      esac
+    done < "$cfg"
+  fi
+}
+
+# Graceful exit
+cleanup() {
+  [[ -n "${SPINNER_PID}" ]] && kill "${SPINNER_PID}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+# JSON helpers
+is_json() { [[ "$OUTPUT_MODE" == "json" ]]; }
+
+emit_json_repo_result() {
+  local repo="$1"; local ok="$2"; local http="$3"; local secrets_str="$4"
+  if is_json; then
+    jq -n --arg repo "$repo" --argjson ok "$ok" --arg http "$http" --arg secrets "$secrets_str" '{time: now, type:"provision", repo:$repo, ok:$ok, http: ( ($http|tonumber) // null ), secrets:(try ($secrets|fromjson) catch null)}'
+  fi
+}
+
+emit_json_summary() {
+  local success="$1"; local total="$2"
+  if is_json; then
+    jq -n --argjson success "$success" --argjson total "$total" '{time: now, type:"summary", success:$success, total:$total}'
+  fi
+}
+
+emit_json_status() {
+  local http="$1"; local body="$2"
+  if is_json; then
+    jq -n --argjson http "$http" --arg body "$body" '{time: now, type:"status", http:$http, body:(try ($body|fromjson) catch $body)}'
+  fi
+}
+
+
+# Defaults that can be overridden by config/env/CLI
+DEFAULT_INTERACTIVE=true
+ASSUME_YES=false
+OUTPUT_MODE=${OUTPUT_MODE:-pretty}  # pretty|json
+DRY_RUN=false
+COMMAND="provision"
+
 
 # Check prerequisites
 check_prerequisites() {
     log_header "Checking Prerequisites"
 
-    # Check if gh CLI is installed
+    # GitHub CLI
     if ! command -v gh &> /dev/null; then
         log_error "GitHub CLI (gh) is not installed"
         log_info "Install from: https://cli.github.com/"
-        exit 1
+        exit ${EXIT_PREREQ}
+
     fi
     log_success "GitHub CLI found"
 
-    # Check if user is authenticated
+    # Authenticated?
     if ! gh auth status &> /dev/null; then
         log_error "Not authenticated with GitHub CLI"
         log_info "Run: gh auth login"
-        exit 1
+        exit ${EXIT_AUTH}
     fi
     log_success "GitHub CLI authenticated"
 
-    # Check if jq is available for JSON parsing
+    # jq
     if ! command -v jq &> /dev/null; then
         log_error "jq is required for JSON parsing"
-        log_info "Install jq: https://stedolan.github.io/jq/download/"
-        exit 1
+        log_info "Install: brew install jq  |  sudo apt-get install jq"
+        log_info "Docs: https://stedolan.github.io/jq/download/"
+        exit ${EXIT_PREREQ}
     fi
     log_success "jq found"
+
+    # curl
+    if ! command -v curl &> /dev/null; then
+        log_error "curl is required"
+        log_info "Install: brew install curl  |  sudo apt-get install curl"
+        exit ${EXIT_PREREQ}
+    fi
+    log_success "curl found"
 }
 
 # Get user's repositories
@@ -88,6 +263,7 @@ select_repositories() {
 
     local repos
     repos=$(get_repositories)
+
 
     echo "Available repositories:"
     echo "$repos" | nl -w2 -s'. '
@@ -142,54 +318,84 @@ provision_repository() {
     local repo="$1"
     local token="$2"
 
-    log_info "Provisioning secrets for $repo..."
+    if ! validate_repo "$repo"; then
+        log_error "Invalid repository format: '$repo' (expected owner/name)"
+        emit_json_repo_result "$repo" false "0" "null"
+        return 1
+    fi
 
-    # Call worker CLI API endpoint
-    local response
+    if [[ "$DRY_RUN" == "true" ]]; then
+        spin_start "[dry-run] Provisioning secrets for $repo"
+        spin_stop 0 "[dry-run] Would provision secrets for $repo"
+        emit_json_repo_result "$repo" true "200" "[]"
+        return 0
+    fi
+
+    spin_start "Provisioning secrets for $repo"
+
+    local response curl_rc=0
     response=$(curl -s -w "%{http_code}" \
         -X POST \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $token" \
         -d "{\"repository\": \"$repo\"}" \
-        "$WORKER_URL/api/cli-provision" || echo "000")
+        "$WORKER_URL/api/cli-provision" 2>/dev/null) || curl_rc=$?
+
+    if [[ $curl_rc -ne 0 || -z "$response" ]]; then
+        spin_stop 1 "Network error while provisioning $repo"
+        log_error "curl failed with exit code $curl_rc"
+        emit_json_repo_result "$repo" false "0" "null"
+        return 1
+    fi
 
     local http_code="${response: -3}"
     local body="${response%???}"
 
     case "$http_code" in
         200|201)
-            log_success "Successfully provisioned secrets for $repo"
+            spin_stop 0 "Successfully provisioned secrets for $repo"
+            local secrets_json
+            secrets_json=$(echo "$body" | jq -c '.secrets // []' 2>/dev/null || echo '[]')
             if [[ -n "$body" ]] && echo "$body" | jq . &> /dev/null; then
-                local secrets
-                secrets=$(echo "$body" | jq -r '.secrets[]? // empty' 2>/dev/null || echo "")
-                if [[ -n "$secrets" ]]; then
-                    log_info "Provisioned secrets: $(echo "$secrets" | tr '\n' ' ')"
+                local secrets_list
+                secrets_list=$(echo "$body" | jq -r '.secrets[]? // empty' 2>/dev/null || echo "")
+                if [[ -n "$secrets_list" ]]; then
+                    log_info "Provisioned secrets: $(echo "$secrets_list" | tr '\n' ' ')"
                 fi
             fi
+            emit_json_repo_result "$repo" true "$http_code" "$secrets_json"
             return 0
             ;;
         401)
-            log_error "Authentication failed for $repo"
+            spin_stop 1 "Authentication failed for $repo"
+            log_info "Tip: Re-authenticate with: gh auth login"
+            emit_json_repo_result "$repo" false "$http_code" "null"
             return 1
             ;;
         403)
-            log_error "Access denied for $repo (check permissions)"
+            spin_stop 1 "Access denied for $repo"
+            log_info "Tip: Ensure you have admin access to the repository."
+            emit_json_repo_result "$repo" false "$http_code" "null"
             return 1
             ;;
         404)
-            log_error "Repository not found: $repo"
+            spin_stop 1 "Repository not found: $repo"
+            log_info "Tip: Verify the repository name and your access."
+            emit_json_repo_result "$repo" false "$http_code" "null"
             return 1
             ;;
         429)
-            log_warning "Rate limited, waiting 60 seconds..."
+            spin_stop 1 "Rate limited by server"
+            log_warning "Waiting 60 seconds before retrying $repo..."
             sleep 60
             provision_repository "$repo" "$token"
             ;;
         *)
-            log_error "Failed to provision $repo (HTTP $http_code)"
+            spin_stop 1 "Failed to provision $repo (HTTP $http_code)"
             if [[ -n "$body" ]]; then
                 log_error "Response: $body"
             fi
+            emit_json_repo_result "$repo" false "$http_code" "null"
             return 1
             ;;
     esac
@@ -203,13 +409,27 @@ provision_secrets() {
 
     log_header "Provisioning CI/CD Secrets"
     log_info "Worker URL: $WORKER_URL"
-    log_info "Repositories: ${#repositories[@]}"
-    echo
+    log_info "Repositories selected: ${#repositories[@]}"
+
+    # Show summary and confirm
+    if [[ "${ASSUME_YES}" != "true" ]]; then
+      echo
+      echo "Repositories to provision:"
+      for r in "${repositories[@]}"; do echo "  - $r"; done
+      echo
+      if ! prompt_yes_no "Proceed with provisioning?" y; then
+        log_warning "Operation cancelled by user"
+        exit ${EXIT_UNKNOWN}
+      fi
+    fi
 
     local success_count=0
     local total_count=${#repositories[@]}
+    local processed=0
 
     for repo in "${repositories[@]}"; do
+        processed=$((processed+1))
+        log_info "(${processed}/${total_count}) Starting: $repo"
         if provision_repository "$repo" "$token"; then
             ((success_count++))
         fi
@@ -219,52 +439,209 @@ provision_secrets() {
     log_header "Provisioning Complete"
     log_info "Successfully provisioned: $success_count/$total_count repositories"
 
+    emit_json_summary "$success_count" "$total_count"
+
     if [[ $success_count -lt $total_count ]]; then
         log_warning "Some repositories failed. Check permissions and repository access."
-        exit 1
+        exit ${EXIT_PARTIAL}
     fi
 
     log_success "All repositories provisioned successfully!"
 }
+# OS info helper
+os_name() {
+  local u
+  u=$(uname -s 2>/dev/null || echo "")
+  case "$u" in
+    Darwin) echo "macOS";;
+    Linux) echo "Linux";;
+    MINGW*|MSYS*|CYGWIN*) echo "Windows";;
+    *) echo "$u";;
+  esac
+}
+
+os_arch() {
+  uname -m 2>/dev/null || echo ""
+}
+
+# Status command
+cmd_status() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[dry-run] Would GET $WORKER_URL/health"
+    emit_json_status 200 '{"status":"ok","dryRun":true}'
+    exit ${EXIT_OK}
+  fi
+  local resp rc=0
+  resp=$(curl -s -w "\n%{http_code}" "$WORKER_URL/health" 2>/dev/null) || rc=$?
+  if [[ $rc -ne 0 || -z "$resp" ]]; then
+    log_error "Network error contacting health endpoint"
+    emit_json_status 0 'null'
+    exit ${EXIT_NETWORK}
+  fi
+  local body http
+  body=$(echo "$resp" | sed '$d')
+  http=$(echo "$resp" | tail -n1)
+  if [[ "$http" == "200" ]]; then
+    log_success "Worker is healthy"
+    emit_json_status 200 "$body"
+    exit ${EXIT_OK}
+  else
+    log_error "Worker health check failed (HTTP $http)"
+    [[ -n "$body" ]] && log_error "Response: $body"
+    emit_json_status "$http" "$body"
+    exit ${EXIT_UNKNOWN}
+  fi
+}
+
+# Config command
+resolve_write_config_path() {
+  if [[ -n "${CONFIG_PATH:-}" ]]; then echo "$CONFIG_PATH"; return; fi
+  local xdg="${XDG_CONFIG_HOME:-$HOME/.config}"
+  echo "$xdg/greener/cli.conf"
+}
+
+cmd_config() {
+  local action="${1:-show}"; shift || true
+  case "$action" in
+    show)
+      local path
+      path=$(resolve_config_path || true)
+      if [[ -n "$path" ]]; then
+        log_info "Using config: $path"
+        if is_json; then jq -Rn --rawfile f "$path" '{path: env.fpath, content: $f}' 2>/dev/null || cat "$path"; else cat "$path"; fi
+      else
+        log_warning "No config file found"
+      fi
+      ;;
+    set)
+      local key="${1:-}" value="${2:-}"
+      if [[ -z "$key" || -z "$value" ]]; then
+        log_error "Usage: ${CLI_NAME} config set <key> <value>"
+        exit ${EXIT_BAD_ARGS}
+      fi
+      local path
+      path=$(resolve_write_config_path)
+      mkdir -p "$(dirname "$path")"
+      # update or append
+      if grep -qi "^$key=" "$path" 2>/dev/null; then
+        sed -i.bak "s|^$key=.*|$key=$value|i" "$path"
+      else
+        echo "$key=$value" >> "$path"
+      fi
+      log_success "Updated $key in $path"
+      ;;
+    *)
+      log_error "Unknown config action: $action"
+      exit ${EXIT_BAD_ARGS}
+      ;;
+  esac
+}
+
+# Remote exec command (requires worker support)
+cmd_remote_exec() {
+  local cmd_str="$*"
+  if [[ -z "$cmd_str" ]]; then
+    log_error "Usage: ${CLI_NAME} remote-exec -- <command and args>"
+    exit ${EXIT_BAD_ARGS}
+  fi
+  local os arch
+  os=$(os_name); arch=$(os_arch)
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[dry-run] Would POST $WORKER_URL/api/exec with command: $cmd_str"
+    emit_json_status 200 "{\"ok\":true,\"dryRun\":true,\"os\":\"$os\",\"arch\":\"$arch\"}"
+    exit ${EXIT_OK}
+  fi
+  local resp rc=0
+  resp=$(curl -s -w "\n%{http_code}" \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"command\":\"$cmd_str\",\"os\":\"$os\",\"arch\":\"$arch\"}" \
+    "$WORKER_URL/api/exec" 2>/dev/null) || rc=$?
+  if [[ $rc -ne 0 || -z "$resp" ]]; then
+    log_error "Network error calling remote exec"
+    emit_json_status 0 'null'
+    exit ${EXIT_NETWORK}
+  fi
+  local body http
+  body=$(echo "$resp" | sed '$d')
+  http=$(echo "$resp" | tail -n1)
+  if [[ "$http" == "200" ]]; then
+    log_success "Remote execution succeeded"
+    emit_json_status 200 "$body"
+    exit ${EXIT_OK}
+  else
+    log_error "Remote execution failed (HTTP $http)"
+    [[ -n "$body" ]] && log_error "Response: $body"
+    emit_json_status "$http" "$body"
+    exit ${EXIT_UNKNOWN}
+  fi
+}
+
 
 # Usage information
 show_usage() {
     cat << EOF
-Greener CI/CD Secret Provisioning Tool
+Greener CI/CD CLI
 
 USAGE:
-    $0 [OPTIONS]
+    ${CLI_NAME} [global options] [command] [args]
 
-OPTIONS:
-    -r, --repos REPO1,REPO2    Comma-separated list of repositories (owner/name format)
-    -i, --interactive          Interactive repository selection (default)
-    -w, --worker-url URL       Custom worker URL (default: $WORKER_URL)
-    -h, --help                 Show this help message
+COMMANDS:
+    provision                 Provision secrets (default)
+    status                    Check worker health
+    config [show|set]         Manage CLI configuration
+    remote-exec -- CMD ARGS   Execute a command remotely via the worker (experimental)
+
+GLOBAL OPTIONS:
+    -r, --repos REPO1,REPO2     Comma-separated list (owner/name)
+    -i, --interactive           Interactive repository selection (default)
+    -n, --non-interactive       Disable interactive prompts
+    -y, --yes                   Assume "yes" to confirmations
+    -w, --worker-url URL        Custom worker URL (default: $WORKER_URL)
+    -c, --config PATH           Load configuration file
+        --dry-run               Preview actions without network calls
+    -o, --output MODE           Output: pretty|json (default: pretty)
+    -v, --verbose               Increase verbosity (repeatable)
+    -q, --quiet                 Reduce verbosity (errors only)
+        --version               Show version information
+    -h, --help                  Show this help message
+
+CONFIG FILE (~/.config/greener/cli.conf):
+    worker_url=...
+    log_level=0|1|2|3|4
+    interactive=true|false
+    color=never
 
 EXAMPLES:
-    $0                                    # Interactive mode
-    $0 -r myorg/repo1,myorg/repo2        # Provision specific repositories
-    $0 -w https://my-worker.dev -i       # Custom worker URL
+    ${CLI_NAME}                                        # Interactive provisioning
+    ${CLI_NAME} -r myorg/repo1,myorg/repo2 -y -n       # Non-interactive, auto-confirm
+    ${CLI_NAME} -w https://my-worker.dev provision     # Explicit subcommand
+    ${CLI_NAME} status                                 # Check worker health
+    ${CLI_NAME} --dry-run -o json -r my/repo           # Dry-run with JSON output
+    ${CLI_NAME} config show                            # Show effective config
+    ${CLI_NAME} config set worker_url https://...      # Persist worker URL
+    ${CLI_NAME} remote-exec -- echo hello              # Execute remotely (if enabled)
 
 SETUP:
     1. Install GitHub CLI: https://cli.github.com/
     2. Install jq: https://stedolan.github.io/jq/
     3. Authenticate: gh auth login
-    4. Run this script
 
-The script will provision these secrets to each repository:
-    - GREENER_CI_KEY
-    - GREENER_CI_SECRET
-    - GREENER_API_TOKEN
-    - GREENER_APP_ID
-    - GREENER_INSTALLATION_ID
+This tool provisions the following secrets per repository:
+    GREENER_CI_KEY, GREENER_CI_SECRET, GREENER_API_TOKEN, GREENER_APP_ID, GREENER_INSTALLATION_ID
+
+Docs: ${HOMEPAGE}
 EOF
 }
 
 # Parse command line arguments
 main() {
     local repos_arg=""
-    local interactive=true
+    local interactive=${DEFAULT_INTERACTIVE}
+
+
+    # Load default config if present
+    apply_config_file || true
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -277,13 +654,42 @@ main() {
                 interactive=true
                 shift
                 ;;
+            -n|--non-interactive)
+                interactive=false
+                shift
+                ;;
+            -c|--config)
+                CONFIG_PATH="$2"
+                shift 2
+                apply_config_file || true
+                ;;
+
+            -y|--yes)
+                ASSUME_YES=true
+                shift
+                ;;
+
             -w|--worker-url)
                 WORKER_URL="$2"
                 shift 2
                 ;;
+            -v|--verbose)
+                LOG_LEVEL=$(( LOG_LEVEL + 1 ))
+                [[ ${LOG_LEVEL} -gt 4 ]] && LOG_LEVEL=4
+                shift
+                ;;
+            -q|--quiet)
+                LOG_LEVEL=1
+                shift
+                ;;
+            --version)
+                echo "${CLI_NAME} v${VERSION}"
+                exit ${EXIT_OK}
+                ;;
+
             -h|--help)
                 show_usage
-                exit 0
+                exit ${EXIT_OK}
                 ;;
             *)
                 log_error "Unknown option: $1"
@@ -294,7 +700,7 @@ main() {
     done
 
     # Header
-    log_header "🌱 Greener CI/CD Secret Provisioning"
+    log_header "🌱 Greener CI/CD Secret Provisioning (v${VERSION})"
 
     # Check prerequisites
     check_prerequisites
@@ -307,18 +713,109 @@ main() {
         if [[ -z "$repos_arg" ]]; then
             log_error "Repository list required when not in interactive mode"
             show_usage
-            exit 1
+            exit ${EXIT_BAD_ARGS}
         fi
         IFS=',' read -ra repositories <<< "$repos_arg"
     fi
 
     if [[ ${#repositories[@]} -eq 0 ]]; then
         log_error "No repositories selected"
-        exit 1
+        exit ${EXIT_BAD_ARGS}
     fi
 
+    # Trim and validate list
+    local valid_repos=()
+    for r in "${repositories[@]}"; do
+        r="$(echo "$r" | xargs)"
+        if validate_repo "$r"; then
+            valid_repos+=("$r")
+        else
+            log_warning "Skipping invalid repository: $r"
+        fi
+    done
+
+    if [[ ${#valid_repos[@]} -eq 0 ]]; then
+        log_error "No valid repositories provided"
+        exit ${EXIT_BAD_ARGS}
+    fi
+
+
     # Provision secrets
-    provision_secrets "${repositories[@]}"
+    provision_secrets "${valid_repos[@]}"
+}
+
+# New main with subcommands and output/dry-run support (overrides previous)
+main() {
+    local repos_arg=""
+    local interactive=${DEFAULT_INTERACTIVE}
+
+    apply_config_file || true
+
+    # Detect subcommand first
+    if [[ $# -gt 0 ]]; then
+      case "$1" in
+        provision|status|config|remote-exec)
+          COMMAND="$1"; shift ;;
+      esac
+    fi
+
+    # Parse global options
+    while [[ $# -gt 0 ]]; do
+      case $1 in
+        -r|--repos) repos_arg="$2"; interactive=false; shift 2;;
+        -i|--interactive) interactive=true; shift;;
+        -n|--non-interactive) interactive=false; shift;;
+        -c|--config) CONFIG_PATH="$2"; shift 2; apply_config_file || true;;
+        -y|--yes) ASSUME_YES=true; shift;;
+        -w|--worker-url) WORKER_URL="$2"; shift 2;;
+        --dry-run) DRY_RUN=true; shift;;
+        -o|--output) OUTPUT_MODE="$2"; shift 2;;
+        -v|--verbose) LOG_LEVEL=$(( LOG_LEVEL + 1 )); [[ ${LOG_LEVEL} -gt 4 ]] && LOG_LEVEL=4; shift;;
+        -q|--quiet) LOG_LEVEL=1; shift;;
+        --version) echo "${CLI_NAME} v${VERSION}"; exit ${EXIT_OK};;
+        -h|--help) show_usage; exit ${EXIT_OK};;
+        --) shift; break;;
+        *)
+          if [[ "$COMMAND" == "remote-exec" || "$COMMAND" == "config" ]]; then
+            break
+          fi
+          log_error "Unknown option: $1"; show_usage; exit ${EXIT_BAD_ARGS};;
+      esac
+    done
+
+    case "$COMMAND" in
+      status) cmd_status; return;;
+      config) cmd_config "$@"; return;;
+      remote-exec) cmd_remote_exec "$@"; return;;
+      provision|*) :;;
+    esac
+
+    # Provision default flow
+    log_header "\xF0\x9F\x8C\xB1 Greener CI/CD Secret Provisioning (v${VERSION})"
+    check_prerequisites
+
+    local repositories=()
+    if [[ "$interactive" == "true" ]]; then
+      readarray -t repositories < <(select_repositories)
+    else
+      if [[ -z "$repos_arg" ]]; then
+        log_error "Repository list required when not in interactive mode"; show_usage; exit ${EXIT_BAD_ARGS}
+      fi
+      IFS=',' read -ra repositories <<< "$repos_arg"
+    fi
+
+    if [[ ${#repositories[@]} -eq 0 ]]; then
+      log_error "No repositories selected"; exit ${EXIT_BAD_ARGS}
+    fi
+
+    local valid_repos=()
+    for r in "${repositories[@]}"; do
+      r="$(echo "$r" | xargs)"
+      if validate_repo "$r"; then valid_repos+=("$r"); else log_warning "Skipping invalid repository: $r"; fi
+    done
+    if [[ ${#valid_repos[@]} -eq 0 ]]; then log_error "No valid repositories provided"; exit ${EXIT_BAD_ARGS}; fi
+
+    provision_secrets "${valid_repos[@]}"
 }
 
 # Run main function

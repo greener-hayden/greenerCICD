@@ -1,0 +1,14 @@
+#compdef greener-provision
+
+_arguments \
+  '(-h --help)'{-h,--help}'[Show help]' \
+  '(--version)--version[Show version]' \
+  '(-r --repos)'{-r,--repos}'[Comma-separated repositories (owner/name)]':repos:_files \
+  '(-i --interactive)'{-i,--interactive}'[Interactive selection]' \
+  '(-n --non-interactive)'{-n,--non-interactive}'[Disable interactive mode]' \
+  '(-y --yes)'{-y,--yes}'[Assume yes to confirmations]' \
+  '(-w --worker-url)'{-w,--worker-url}'[Worker URL]':url:_urls \
+  '(-c --config)'{-c,--config}'[Path to config file]':file:_files \
+  '(-v --verbose)'{-v,--verbose}'[Increase verbosity]' \
+  '(-q --quiet)'{-q,--quiet}'[Errors only]'
+

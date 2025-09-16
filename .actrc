@@ -1,0 +1,30 @@
+# Act configuration for greenerCICD
+# Optimized for Claude Code Review workflow execution
+
+# Use smaller, faster images for better performance
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# Reuse containers for faster subsequent runs
+--reuse
+
+# Don't pull images unless necessary
+--pull=false
+
+# Set artifact server path
+--artifact-server-path=/tmp/artifacts
+
+# Container options optimized for Claude Code Review
+--container-options="--memory=3g --cpus=2"
+
+# Enable verbose logging for debugging (can be overridden)
+--verbose
+
+# Set reasonable timeout for workflow execution (10 minutes)
+--action-timeout=600
+
+# Default environment variables for local testing
+--env GITHUB_ACTIONS=true
+--env CI=true
+
+# Use bind mount for better file access
+--use-gitignore=false

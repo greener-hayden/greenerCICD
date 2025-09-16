@@ -32,6 +32,40 @@ chmod +x greener-provision
 ./greener-provision --repos "myorg/repo1,myorg/repo2"
 ```
 
+### CLI Help and Version
+```bash
+./greener-provision --help
+./greener-provision --version
+```
+
+### Shell Completion (optional)
+```bash
+# Bash
+source completions/greener-provision.bash  # or copy into /etc/bash_completion.d/
+
+# Zsh
+fpath+=$(pwd)/completions
+autoload -Uz compinit && compinit
+```
+
+### Advanced Usage
+```bash
+# Dry-run (no network) with JSON output for scripting
+./greener-provision provision --dry-run -o json -r "org/repo"
+
+# Health check
+./greener-provision status
+
+# Manage config
+./greener-provision config show
+./greener-provision config set worker_url https://your-worker.workers.dev
+
+# Remote execution (experimental; requires worker support)
+./greener-provision remote-exec -- echo hello
+```
+
+
+
 ### What You Get
 Each repository receives these secrets:
 - `GREENER_CI_KEY` - Unique 32-character CI key

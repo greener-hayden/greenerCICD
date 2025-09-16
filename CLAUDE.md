@@ -186,6 +186,35 @@ greenerCICD/
 
 ## Development Workflow
 
+### Pre-Push Validation
+A comprehensive pre-push hook automatically validates code before allowing pushes:
+
+**Validations Performed:**
+- **Whitespace/Formatting**: `git diff --check` for trailing whitespace and formatting issues
+- **Secret Scanning**: Basic detection of API keys, tokens, and credentials in commits
+- **Bash Validation**: `shellcheck` on `greener-provision` script (if available)
+- **Worker Validation**: `wrangler dev --dry-run` for Cloudflare Worker syntax (if wrangler installed)
+- **Workflow Validation**: `actionlint` on GitHub Actions files (if available)
+- **Claude Code Review**: `act pull_request` simulation with CLAUDE_CODE_OAUTH_TOKEN
+
+**Setup Requirements:**
+```bash
+# Required for Claude Code Review simulation
+export CLAUDE_CODE_OAUTH_TOKEN="your_token_here"
+
+# Optional tools for enhanced validation (install as needed):
+# - shellcheck (bash script linting)
+# - wrangler (Cloudflare Worker validation)
+# - actionlint (GitHub Actions validation)
+# - act (local GitHub Actions simulation)
+```
+
+**Bypassing Validations:**
+```bash
+# Skip pre-push validations when needed
+git push --no-verify
+```
+
 ### For New Features
 1. **Read Documentation**: Start with [wiki/03-development-guide.md](wiki/03-development-guide.md)
 2. **Understand Security**: Review [wiki/06-security.md](wiki/06-security.md)
