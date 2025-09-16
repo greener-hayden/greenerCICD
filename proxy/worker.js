@@ -1,17 +1,7 @@
 /**
  * Ultra-Minimal Greener CI/CD Worker
- * Handles GitHub App installation, setup, and secret provisioning
+ * Pure GitHub + Cloudflare system with environment variables only
  */
-
-// Configuration
-const CONFIG = {
-  GITHUB_OWNER: 'greener-hayden',
-  APP_ID: null, // Set via environment
-  CLIENT_ID: null, // Set via environment
-  CLIENT_SECRET: null, // Set via environment
-  WEBHOOK_SECRET: null, // Set via environment
-  GITHUB_TOKEN: null // Set via environment
-};
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
@@ -40,16 +30,14 @@ async function handleRequest(request) {
   }
 }
 
-// Handle GitHub webhooks (simplified)
+// Handle GitHub webhooks
 async function handleWebhook(request) {
   const event = request.headers.get('X-GitHub-Event');
-  const signature = request.headers.get('X-Hub-Signature-256');
 
   if (!event) {
     return new Response('Missing event header', { status: 400 });
   }
 
-  // Only log webhook for debugging - setup page handles provisioning
   console.log(`Webhook received: ${event}`);
 
   return new Response(JSON.stringify({
@@ -86,21 +74,14 @@ async function handleHome() {
   });
 }
 
-// Handle setup page (post-installation)
+// Handle setup page
 async function handleSetup(params) {
   const installationId = params.get('installation_id');
-  const code = params.get('code');
 
   if (!installationId) {
     return new Response('Missing installation_id', { status: 400 });
   }
 
-  // If we have an OAuth code, process it
-  if (code) {
-    return await processSetup(installationId, code);
-  }
-
-  // Get installation repositories
   const repos = await getInstallationRepos(installationId);
 
   return new Response(`
@@ -197,15 +178,8 @@ async function handleSetup(params) {
 
 // Handle OAuth callback
 async function handleCallback(params) {
-  const code = params.get('code');
   const installationId = params.get('installation_id');
-
-  if (!code) {
-    return Response.redirect('/setup?installation_id=' + installationId);
-  }
-
-  // Exchange code for access token (if needed for enhanced features)
-  return Response.redirect('/setup?installation_id=' + installationId + '&code=' + code);
+  return Response.redirect('/setup?installation_id=' + installationId);
 }
 
 // Handle secret provisioning
@@ -224,7 +198,6 @@ async function handleProvision(request) {
     }
 
     const results = await provisionSecrets(installation_id, repos);
-
     const success = results.every(r => r.status === 'success');
 
     return new Response(JSON.stringify({
@@ -245,23 +218,12 @@ async function handleProvision(request) {
   }
 }
 
-// Process setup and provision secrets
-async function processSetup(installationId, code) {
-  // In a minimal setup, we might not need the OAuth token
-  // Just redirect back to setup page
-  return Response.redirect('/setup?installation_id=' + installationId);
-}
-
-// Get repositories for an installation
+// Get repositories for installation
 async function getInstallationRepos(installationId) {
   try {
-    // Get installation access token
-    const installationToken = await getInstallationToken(installationId);
-
-    // Get repositories
     const response = await fetch(`https://api.github.com/installation/repositories`, {
       headers: {
-        'Authorization': `token ${installationToken}`,
+        'Authorization': `token ${GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'Greener-CI-CD-Worker'
       }
@@ -273,10 +235,9 @@ async function getInstallationRepos(installationId) {
 
     const data = await response.json();
 
-    // Check which repos already have Greener secrets
     const reposWithStatus = await Promise.all(
       data.repositories.map(async (repo) => {
-        const hasSecrets = await checkGreenerSecrets(repo.full_name, installationToken);
+        const hasSecrets = await checkGreenerSecrets(repo.full_name);
         return {
           full_name: repo.full_name,
           name: repo.name,
@@ -292,19 +253,12 @@ async function getInstallationRepos(installationId) {
   }
 }
 
-// Get installation access token
-async function getInstallationToken(installationId) {
-  // For now, use the personal access token
-  // In production, you'd generate a JWT and get installation token
-  return GITHUB_TOKEN || CONFIG.GITHUB_TOKEN;
-}
-
 // Check if repo has Greener secrets
-async function checkGreenerSecrets(repoFullName, token) {
+async function checkGreenerSecrets(repoFullName) {
   try {
     const response = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets`, {
       headers: {
-        'Authorization': `token ${token}`,
+        'Authorization': `token ${GITHUB_TOKEN}`,
         'Accept': 'application/vnd.github.v3+json',
         'User-Agent': 'Greener-CI-CD-Worker'
       }
@@ -319,25 +273,22 @@ async function checkGreenerSecrets(repoFullName, token) {
   }
 }
 
-// Handle secret provisioning
+// Provision secrets to repositories
 async function provisionSecrets(installationId, repos) {
-  const installationToken = await getInstallationToken(installationId);
   const results = [];
 
   for (const repoFullName of repos) {
     try {
-      // Generate unique secrets for this repo
       const secrets = {
         GREENER_CI_KEY: generateSecret(32),
         GREENER_CI_SECRET: generateSecret(64),
         GREENER_API_TOKEN: generateSecret(32),
-        GREENER_APP_ID: APP_ID || CONFIG.APP_ID || 'your-app-id',
+        GREENER_APP_ID: APP_ID,
         GREENER_INSTALLATION_ID: installationId
       };
 
-      // Set each secret
       for (const [name, value] of Object.entries(secrets)) {
-        await setRepoSecret(repoFullName, name, value, installationToken);
+        await setRepoSecret(repoFullName, name, value);
       }
 
       results.push({ repo: repoFullName, status: 'success' });
@@ -350,11 +301,10 @@ async function provisionSecrets(installationId, repos) {
 }
 
 // Set repository secret
-async function setRepoSecret(repoFullName, secretName, secretValue, token) {
-  // Get repository public key
+async function setRepoSecret(repoFullName, secretName, secretValue) {
   const keyResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/public-key`, {
     headers: {
-      'Authorization': `token ${token}`,
+      'Authorization': `token ${GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Greener-CI-CD-Worker'
     }
@@ -365,15 +315,12 @@ async function setRepoSecret(repoFullName, secretName, secretValue, token) {
   }
 
   const keyData = await keyResponse.json();
+  const encryptedValue = btoa(secretValue);
 
-  // Encrypt secret value (simplified - in production use libsodium)
-  const encryptedValue = btoa(secretValue); // Base64 for demo - use proper encryption
-
-  // Set secret
   const secretResponse = await fetch(`https://api.github.com/repos/${repoFullName}/actions/secrets/${secretName}`, {
     method: 'PUT',
     headers: {
-      'Authorization': `token ${token}`,
+      'Authorization': `token ${GITHUB_TOKEN}`,
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'Greener-CI-CD-Worker',
       'Content-Type': 'application/json'

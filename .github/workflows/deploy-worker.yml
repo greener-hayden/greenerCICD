@@ -33,9 +33,11 @@ jobs:
           secrets: |
             GITHUB_TOKEN
             WEBHOOK_SECRET
+            APP_ID
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          APP_ID: ${{ secrets.APP_ID }}
 
       - name: Deployment summary
         run: |
